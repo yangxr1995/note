@@ -149,7 +149,7 @@ config.initial_rows = 30
 
 -- 设置默认的启动shell
 config.set_environment_variables = {
-    COMSPEC = 'C:\\Users\\CJTX\\scoop\\apps\\git\\current\\usr\\bin\\bash.exe',
+    COMSPEC='C:\\scoop\\apps\\git\\current\\usr\\bin\\bash.exe',
     -- COMSPEC = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     -- COMSPEC = 'C:\\Users\\CJTX\\scoop\\apps\\nu\\current\\nu.exe',
 }
@@ -1845,29 +1845,12 @@ return config
             "target": "calc.exe"
           }
         ],
-        "dingding": [
-          {
-            "windowGroupID": 0,
-            "actionTypeID": 1,
-            "winTitle": "C:\\Users\\Public\\Desktop\\钉钉.lnk",
-            "target": "C:\\Users\\Public\\Desktop\\钉钉.lnk"
-          }
-        ],
         "doc": [
           {
             "windowGroupID": 0,
             "actionTypeID": 1,
             "comment": "This PC > Documents",
             "target": "shell:Local Documents"
-          }
-        ],
-        "drawio": [
-          {
-            "windowGroupID": 0,
-            "actionTypeID": 1,
-            "comment": "draw.io",
-            "winTitle": "ahk_exe draw.io.exe",
-            "target": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\draw.io.lnk"
           }
         ],
         "edge": [
@@ -1916,7 +1899,7 @@ return config
             "windowGroupID": 0,
             "actionTypeID": 1,
             "winTitle": "ahk_exe Everything.exe",
-            "target": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Everything.lnk"
+            "target": "C:\\scoop\\apps\\everything\\current\\everything.exe"
           }
         ],
         "set": [
@@ -1941,7 +1924,8 @@ return config
             "actionTypeID": 1,
             "comment": "wezterm",
             "winTitle": "ahk_class org.wezfurlong.wezterm",
-            "target": "C:\\Users\\CJTX\\scoop\\apps\\wezterm\\current\\wezterm-gui.exe"
+            "target": "C:\\scoop\\apps\\wezterm\\current\\wezterm-gui.exe",
+            "runAsAdmin": true
           }
         ],
         "vm": [
@@ -1950,7 +1934,7 @@ return config
             "actionTypeID": 1,
             "comment": "vmware",
             "winTitle": "ahk_exe vmware.exe",
-            "target": "D:\\vmware\\vmware.exe"
+            "target": "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmware.exe"
           }
         ],
         "wechat": [
@@ -1959,7 +1943,7 @@ return config
             "actionTypeID": 1,
             "comment": "微信",
             "winTitle": "ahk_exe WeChat.exe",
-            "target": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\微信\\微信.lnk"
+            "target": "C:\\Program Files\\Tencent\\WeChat\\WeChat.exe"
           }
         ]
       }
@@ -2116,8 +2100,12 @@ return config
     }
   ],
   "options": {
-    "mykeymapVersion": "2.0-beta29",
+    "mykeymapVersion": "2.0-beta31",
     "windowGroups": [
+      {
+        "id": -1,
+        "name": "🚫 Exclude"
+      },
       {
         "id": 0,
         "name": "🌎 Global"
@@ -2266,7 +2254,7 @@ zsh自带插件，无需安装，用于快速跳转历史目录
 #### zsh-autosuggestions
 下载
 ```shell
-git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+git clone https://github.com/zsh-users/zsh-autosuggestions ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions
 ```
 启用
 ```shell
@@ -2279,7 +2267,7 @@ plugins=(
 #### zsh-syntax-highlighting
 下载
 ```shell
-git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ~/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting
 ```
 启用
 ```shell
@@ -2351,6 +2339,8 @@ set -g copy-command 'xsel -i'
 run '/root/.tmux/plugins/tpm/tpm'
 ```
 
+输入 `preifx + I` 安装插件
+
 ### tmuxifier
 已在tpm中安装
 
@@ -2405,4 +2395,34 @@ fi
 finalize_and_go_to_session
 ```
 
+## nvim
+### 编译
+ubuntu18需要升级cmake
+
+```shell
+wget https://cmake.org/files/v3.16/cmake-3.16.0-Linux-x86_64.tar.gz
+tar xf cmake-3.16.0-Linux-x86_64.tar.gz
+cp cmake-3.16.0-Linux-x86_64/* /usr/ -rfd
+```
+
+下载nvim 编译安装
+```shell
+wget https://github.com/neovim/neovim/archive/refs/tags/nightly.tar.gz
+tar xf nightly.tar.gz
+cd neovim-nightly
+make CMAKE_BUILD_TYPE=RelWithDebInfo
+cd build
+cpack -G DEB
+dpkg -i nvim-linux64.deb
+```
+
+
+
+```shell
+apt install -y yarn npm luarocks
+
+wget https://github.com/tree-sitter/tree-sitter/releases/download/0.16.0/tree-sitter-linux-x64.gz
+
+git clone git@github.com:yangxr1995/my-nvim-cfg.git ~/.config/nvim/
+```
 
