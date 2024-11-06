@@ -209,6 +209,7 @@ QoS
   
   mqtt基于tcp，发送CONNECT报文前需要完成握手
 
+## CONNECT
 - CONNECT报文的可变头部中重要字段
   - ClientID
     - clientID并非必须要，client可以设置长度为0的clientID表示有Broker分配ClientID
@@ -222,11 +223,13 @@ QoS
     - 要确保client不超时，简单的做法是固定周期发送PINGREQ报文
     - 若发生超时，在1.5倍的keepalive时间时，broker判定client掉线，断开连接，并发送遗嘱消息
 
+## CONNACK
 - CONNACK
   - ReasonCode
     - 表示连接是否成功建立，和失败的原因
   - Session Present
 
+## DISCONNECT
 - DISCONNECT
   - client断开连接时应该发送DISCONNECT，否则broker会认为client是异常掉线，导致触发遗嘱消息
 
@@ -249,190 +252,117 @@ broker收到消息后会找到其Topic的订阅者，并转发，如果没有订
            │ 发布者 │            │  Topic a 缓存消息│            │ 订阅者 │                                                    
            └────────┘            └──────────────────┘            └────────┘                                                    
 
-
-## PUBLISH 发布消息
-
-### 重要字段
-
-#### Topic Name
-
-类型 utf-8 string
-
-home/temperature
-
-#### QoS
-
-类型 int
-QoS0 : 消息可能丢失
-QoS1 : 消息不会丢失，可能重复
-QoS2 : 消息不会丢失，不会重复
-
-#### Retain
-
-指定此消息是否为保留消息
-
-Broker会对保留消息进行持久化，当订阅者上线后，会立即收到保留消息，而不需要等待下次发布周期
-
-#### DUP
-
-有效值 : 0 - 1
-
-说明本消息是否为重传消息
-
-只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被置一
-
-#### Packet ID
-
-有效值 : 1 - 65535
-
-此消息的标识符
-
-只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被设置
-
-### payload
-
-类型 : char
-
-可以放 json , 加密文本，二进制字段 
-
-## SUBSCRIBE 订阅消息
-
-Packet ID
-
-Subscription List
-
-### Packet ID
-
-在 SUBSCRIBE 和 SUBACK 被使用，用于防止丢包
-
-有效值 : 1 - 65535
-
-此消息的标识符
-
-
-### Subscription List
-
-订阅列表可以包含多个订阅
-
-每个订阅由主题过滤器和QoS组成
-
-Topic Filter 1 | QoS
-Topic Filter 2 | QoS
-Topic Filter 3 | QoS
-
-#### Topic Filter
-主题过滤器支持通配符匹配
-
-订阅 a/+
-
-当发布两个主题的消息: a/1 a/2
-
-两个主题的消息都能会被Broker转发给订阅者
-
-#### QoS
-订阅的QoS用于设置Broker转发给订阅者时，使用的最大QoS等级
-
-比如 
-
-订阅QoS为1
-
-发布的QoS为 2
-
-Broker使用 QoS1 转发给订阅者
-
-订阅QoS为1
-
-发布的QoS为0
-
-Broker使用 QoS0 转发给订阅者
-
-
-#### 订阅的覆盖
-当Broker已有订阅条目
-
-Topic Filter  QoS
-    a/1        0
-
-订阅者再次订阅，且Topic Filter相同，则条目会被覆盖
-
-Topic Filter  QoS
-    a/1        2
-
-Broker 的订阅条目
-
-Topic Filter  QoS
-    a/1        2
-
-若 Topic Filter 不同，则会添加，如再订阅
-
-Topic Filter  QoS
-    a/+        2
-
-Broker 条目
-
-Topic Filter  QoS
-    a/1        2
-Topic Filter  QoS
-    a/+        2
-
-当发布 a/1 时，由于两个订阅条目都匹配，则会发送两条消息给订阅者
-
-## SUBACK
-
-订阅的操作响应
-
-Packet ID
-
-Reason Codes
-
-订阅可能失败，根据 Reason code 说明
-
-### Reason Code
-
-#### 成功
-0x00 订阅成功，且最大QoS为0
-0x01 订阅成功，且最大QoS为1
-0x02 订阅成功，且最大QoS为2
-
-#### 失败
-0x80 订阅失败
+## PUBLISH报文重要字段
+
+- Topic Name
+  - 用于指定消息的主题，一条消息只能有一个主题
+  - 类型 utf-8 string
+  - home/temperature
+- QoS
+  - 类型 int
+  - QoS0 : 消息可能丢失
+  - QoS1 : 消息不会丢失，可能重复
+  - QoS2 : 消息不会丢失，不会重复
+- payload
+  - 消息内容
+  - 可以是任意类型的数据，如json,binary,ciphertext_base64
+- Retain
+  - 指定消息是否是保留消息
+  - 当消息为保留消息时，除了正常转发外，broker会缓存消息，每当有新的订阅者，会立即转发保留消息
+  - 好处：对于周期更新的数据，订阅者能立即收到消息，而不需要等待下次的发布周期
+- Packet ID
+  - 用于标识PUBLISH的ID
+  - 有效值 : 1 - 65535
+  - 只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被设置
+- DUP
+  - 有效值 : 0 - 1
+  - 说明本消息是否为重传消息
+  - 只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被置一
+
+## SUBSCRIBE 报文重要字段
+- Packet ID
+  - 用于标识SUBSCRIBE的ID
+  - 有效值 : 1 - 65535
+  - 只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被设置
+- Subscription List
+  - 订阅列表可以包含多个订阅
+  - 每个订阅都由一个 Topic filter 和 QoS组成
+    - Topic Filter 和 Topic 不同，Topic Filter可以使用通配符来匹配多个Topic
+    - Topic Filter 为 a/+ 则订阅 a/1 a/2 等多个匹配的主题
+    - 而Topic 必须为确定的不能为 a/+，只能为 a/1 或 a/2
+      - 当订阅者使用相同的 Topic Filter订阅时，如先订阅a/1 QoS1 ，再订阅a/1 QoS2，由于Topic相同，broker会进行覆盖得到 a/1 Qos2 一条订阅
+      - 当订阅者使用不同的 Topic Filter订阅时，如先订阅a/1 QoS1 ，再订阅a/+ QoS2，由于Topic不同，broker得到两条订阅 a/1 a/+，当发布a/1时，broker会转发a/1两次给订阅者
+  - QoS
+    - 订阅者和发布者都可以给消息设置QoS，broker以两者设置的最小值为转发消息的QoS
+    - 比如消息发布时QoS设置为2，订阅者给的QoS为1，则broker使用QoS1来转发消息
+
+## SUBACK重要字段
+- Packet ID
+  - 相当于会话ID，和对应的SUBSCRIBE的Packet ID相等
+  - 用于QoS3 和 QoS2的去重和重传
+  - 只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被设置
+- Reason Codes
+  - 成功
+    - 0x00 订阅成功且最大QoS为0
+    - 0x01 订阅成功且最大QoS为1
+    - 0x02 订阅成功且最大QoS为2
+  - 失败
+    - 0x80 订阅失败
 
 ## UNSUBSCRIBE
-
-取消订阅
-
-Packet ID
-Topic Filters
-
-### Topic Filters
-
-主题名称必须完全匹配，不能使用通配符
-
+- Packet ID
+  - 用于标识UNSUBSCRIBE的ID
+  - 只有当QoS1 和QoS2时，才有防丢包的重传功能，所以只有此时此字段才可能被设置
+- Topic Filters
+  - 要取消订阅的主题过滤器列表
+  - Topic Filter使用完全的文本匹配
 
 ## UNSUBACK
+- Packet ID
+  - 相当于会话ID，和对应的UNSUBSCRIBE的Packet ID相等
+  - 用于QoS3 和 QoS2的去重和重传
+- ~~Reason Code~~ 
+  - mqtt3.1 UNSUBACK没有原因码
 
-取消订阅的操作响应
+# Topic
+- utf-8字符串
+- 区分大小写
+- 支持分层
+  - 主题层级长度可以为0
+    - level1//level3
+  - 使用通配符实现一次订阅多个主题
+    - 单层通配符+
+      - home/+/temperature
+    - 多层通配符#
+      - home/#
+      - 多层通配符必须是最后一个层级
+        - 错误: home/#/temperature
+    - 通配符必须完全占据一个层级
+      - 错误：home/+floor/temperature  home/temperature#
+- $开头的主题 
+  - 内容为broker的系统信息
+  - $开头的主题是broker使用的，客户端只能订阅不能发布
 
-Packet ID
-Reason Code (mqtt3没有Reason code, mqtt5 新增了Reason code)
+# EMQX
+- 环境ubuntu18
 
-## Topic || Topic Filters
+```shell
+curl -s https://assets.emqx.com/scripts/install-emqx-deb.sh | sudo bash
+sudo apt-get install emqx
 
-主题是发布订阅的重要字段
+# 后台启动
+emqx start
+# 前台启动
+emqx foreground
 
-mqtt对主题的定义如下
+emqx stop
+emqx restart
+emqx ping Ping EMQ X Broke
 
-主题同个斜杠进行分层
+emqx ctl log set-level debug
+```
 
-a/b/c
 
-支持通配符
-
-单层通配符 +
-
-多层通配符 #
-
-Broker 的Topic 以 $开头，用于发布系统信息
 
 # 会话
 
