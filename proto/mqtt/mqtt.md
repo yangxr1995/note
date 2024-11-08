@@ -362,7 +362,19 @@ emqx ping Ping EMQ X Broke
 emqx ctl log set-level debug
 ```
 
+## mqtt3.1.1
+### CONNECT
 
+![CONNECT CONNACK](assets/2024-11-08-10-22-51.jpg)
+
+### PINGREQ
+![PINGREQ PINGRESP](assets/2024-11-08-10-24-02.jpg)
+
+### PUBLISH
+![PUBLISH](assets/2024-11-08-10-25-41.jpg)
+
+
+![PUBLISH QoS2](assets/2024-11-08-10-26-54.jpg)
 
 # 会话
 
