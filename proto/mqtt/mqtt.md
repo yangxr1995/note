@@ -495,262 +495,251 @@ QoS2 : 消息不会丢失，不会重复
 
 ## QoS0
 
-发送端只发送一次。
+- 发送端只发送一次。
+- 发送可能丢失
 
-发送可能丢失
+                     PUBLISH QoS0
+       ┌──────┐                         ┌──────────┐
+       │sender├────────────────────────►│ recevier │
+       └──────┘                         └──────────┘
 
-
+                     报文可能丢失
+                     PUBLISH QoS0
+       ┌──────┐                         ┌──────────┐
+       │sender├─────────X──────────────►│ recevier │
+       └──────┘                         └──────────┘
+ 
 ## QoS1
+- 引入重传机制
+- 接收端必须对每个发送进行响应
+- 若没有收到响应，发送端会重传消息
+- 为了实现重传机制，会使用字段 Packet ID , DUP
+- QoS1 导致消息重复，只能同个业务进行去重，比如给消息增加时间戳或递增的计数
 
-引入重传机制
 
-接收端必须对每个发送进行响应
+       ┌───────┐                                                       ┌──────────┐
+       │ sender│                                                       │ recevier │
+       └───┬───┘                                                       └─────┬────┘
+           │       PUBLISH QoS1, DUP(0) PacketID(111) payload("aa")          │
+           ├────────────────────────────────────────────────────────────────►│
+           │                                                                 │
+           │       PUBACK PacketID(111)                                      │
+           │◄────────────────────────────────────────────────────────────────│
+           │                                                                 ▼
+           ▼
 
-若没有收到响应，发送端会重传消息
 
-为了实现重传机制，会使用字段 Packet ID , DUP
+        ┌───────┐                                                       ┌──────────┐ 
+        │ sender│                                                       │ recevier │ 
+        └───┬───┘                                                       └─────┬────┘ 
+            │       PUBLISH QoS1, DUP(0) PacketID(111) payload("aa")          │                                                                                                                                            # QoS2
+            ├──────────────────────────────X─────────────────────────────────►│                                                                                                                                            涉及报文
+            │                                                                 │
+            │       PUBLISH QoS1, DUP(1) PacketID(111) payload("aa")          │                                                                                                                                            # QoS2
+            ├────────────────────────────────────────────────────────────────►│                                                                                                                                            涉及报文
+            │                                                                 │      
+            │       PUBACK PacketID(111)                                      │                                                                                                                                            UBLISH
+            │◄────────────────────────────────────────────────────────────────│      
+            │                                                                 │
+            ▼                                                                 ▼
 
-QoS1 导致消息重复，只能同个业务进行去重，比如给消息增加时间戳或递增的计数
 
-涉及报文
+            重传导致的问题
 
-PUBLISH
+            虽然发送方使用DUP标识消息是否是重传消息，但是接收方收到任何消息都必须当成全新的消息，
+            考虑下面情况
 
-PUBACK
+         ┌───────┐                                                       ┌──────────┐  
+         │ sender│                                                       │ recevier │  
+         └───┬───┘                                                       └─────┬────┘  
+             │       PUBLISH QoS1, DUP(0) PacketID(111) payload("aa")          │       
+             ├────────────────────────────────────────────────────────────────►│       
+             │         第一个消息成功到达，PacketID 111可以被重复使用          │
+             │       PUBACK PacketID(111)                                      │       
+             │◄────────────────────────────────────────────────────────────────│       
+             │                                                                 │       
+             │         使用PacketID 111发送第二个消息，但第二个消息需要重传    │
+             │       PUBLISH QoS1, DUP(0) PacketID(111) payload("bb")          │       
+             ├──────────────────────────────X─────────────────────────────────►│       
+             │                                                                 │
+             │         第二个消息的重传到达了，但是由于PacketID是111所以无法   │
+             │         和第一个消息做区分，因为第一个消息的ACK丢失的情况也是   │
+             │         这样                                                    │
+             │       PUBLISH QoS1, DUP(1) PacketID(111) payload("bb")          │       
+             ├────────────────────────────────────────────────────────────────►│       
+             │                                                                 │       
+             │       PUBACK PacketID(111)                                      │       
+             │◄────────────────────────────────────────────────────────────────│       
+             │                                                                 │       
+             ▼                                                                 ▼       
+                                                                                       
+                  可见仅从mqtt头部分很难去重，这就导致QoS2很复杂
 
+### mqtt重传和tcp重传
+- 在tcp未断开时，tcp负责重传
+- QoS1 QoS2的消息重传必须在上次tcp连接断开后，进行新的tcp连接，并重传上次未响应的消息.
+ 
 ## QoS2
 
-涉及报文
+报文
+PUBLISH : 发送消息
+PUBREC : 相当于PUBACK，表示收到了消息
+PUBREL : 发送者准备释放缓存的消息
+PUBCOMP : 接收方通知可以释放缓存的消息
 
-PUBLISH
+              ┌───────┐                                                       ┌──────────┐    
+              │ sender│                                                       │ recevier │    
+              └───┬───┘                                                       └─────┬────┘    
+             ┌────┤                                                                 │
+       ┌─────┴──┐ │                                                                 │
+       │缓存报文│ │                                                                 │
+       └─────┬──┘ │                                                                 │
+             └────┤       PUBLISH QoS2, DUP(0) PacketID(111) payload("aa")          │         
+                  ├──────────────────────────────X─────────────────────────────────►│         
+                  │                                                                 │         
+                  │       PUBLISH QoS2, DUP(1) PacketID(111) payload("aa")          │         
+                  ├────────────────────────────────────────────────────────────────►│         
+                  │                                                                 │         
+                  │       PUBREC PacketID(111)                                      │         
+                  │◄────────────────────────────────────────────────────────────────│         
+                  │                                                                 │         
+                  │       PUBREL PacketID(111) 准备释放相关报文                     │
+                  ├────────────────────────────────────────────────────────────────►│
+                  │                                                                 │
+                  │       PUBCOMP PacketID(111) 可以释放                            │
+                  │◄────────────────────────────────────────────────────────────────│
+           ┌──────┤                                                                 │
+    ┌──────┴──┐   │                                                                 │         
+    │ 释放报文│   │                                                                 │
+    └──────┬──┘   │                                                                 │
+           └─────►│                                                                 ▼
+                  ▼
 
-PUBREC (PUBLISH recevie) : 接收到了PUBLISH报文
-
-PUBREL (PUBLISH release) : 释放了PUBLISH报文
-
-PUBCOMP (PUBLISH complate) : 这一次的消息发布即将完成
-
-
-sender ---- PUBLISH PacketID(10) DUP(0)----> recevier |            新消息
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息          
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息
-                                                      |
-    PUBREC 之前 sender可以发送重复报文                |
-                                                      |
-sender <--- PUBREC PacketID(10) ------------ recevier |
-                                                      |
-sender ---- PUBREL PacketID(10) -----------> recevier ------------ recevier以PUBREL为界限, 
-                                                      |            PUBREL之前收到的消息都当成重复的消息(一个消息)
-    PacketID(10)  释放中                              |            之后收到的消息才是新消息
-    sender 既不能重传也不能发送新的信息               |
-                                                      |
-sender <--- PUBCOMP PacketID(10) ------------ recevier|
-                                                      |
-    可以发布新的信息                                  |
-                                                      |
-sender ---- PUBLISH PacketID(10) DUP(0)----> recevier |            新消息
-
-合适分发QoS2消息
-
-由于sender发送的消息必须在收到PUBCOMP后,导致影响实时性，所以recevier应该尽快分发消息，即在第一次收到PUBLISH时就分发消息
-
-sender ---- PUBLISH PacketID(10) DUP(0)----> recevier |            新消息   : 向后分发
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息 : 忽略
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息 : 忽略
-sender ---- PUBLISH PacketID(10) DUP(1)----> recevier |            重复消息 : 忽略
-                                                      |
-    PUBREC 之前 sender可以发送重复报文                |
-                                                      |
-sender <--- PUBREC PacketID(10) ------------ recevier |
-                                                      |
-sender ---- PUBREL PacketID(10) -----------> recevier ------------ recevier以PUBREL为界限, 
-                                                      |            PUBREL之前收到的消息都当成重复的消息(一个消息)
-    PacketID(10)  释放中                              |            之后收到的消息才是新消息
-    sender 既不能重传也不能发送新的信息               |
-                                                      |
-sender <--- PUBCOMP PacketID(10) ------------ recevier|
-                                                      |
-    可以发布新的信息                                  |
-                                                      |
-sender ---- PUBLISH PacketID(10) DUP(0)----> recevier |            新消息  : 向后分发
+                   QoS2 之所以可以去重，关键在于 PUBREL，PUBREL之前不能发送新的报文,
+                   所以接收方能根据PUBREL，认为PUBREL之前的报文都是重复的，PUBREL之后的报文才是新的
 
 
+               ┌───────┐                                                       ┌──────────┐     
+               │ sender│                                                       │ recevier │     
+               └───┬───┘                                                       └─────┬────┘     
+              ┌────┤                                                                 │          
+        ┌─────┴──┐ │                                                                 │          
+        │缓存报文│ │                                                                 │          
+        └─────┬──┘ │                                                                 │          
+              └────┤       PUBLISH QoS2, DUP(0) PacketID(111) payload("aa")          │       │  
+                   ├──────────────────────────────X─────────────────────────────────►│       │  都是重复报文
+                   │                                                                 │       │  
+                   │       PUBLISH QoS2, DUP(1) PacketID(111) payload("aa")          │       │  
+                   ├────────────────────────────────────────────────────────────────►│       │  
+                   │                                                                 │       │  
+                   │       PUBREC PacketID(111)                                      │       │  
+                   │◄────────────────────────────────────────────────────────────────│       │  
+                   │                                                                 │       │  
+                   │       PUBREL PacketID(111) 准备释放相关报文                     │       ▼  
+                   ├────────────────────────────────────────────────────────────────►│          
+                   │                                                                 │            │
+                   │       PUBCOMP PacketID(111) 可以释放                            │            │
+                   │◄────────────────────────────────────────────────────────────────│            │
+            ┌──────┤                                                                 │            │
+     ┌──────┴──┐   │                                                                 │            │
+     │ 释放报文│   │                                                                 │            │
+     └──────┬──┘   │                                                                 │            │ 开始有新报文
+            └─────►│                                                                 │            │
+                   │                                                                 │            │                                                                                                                                                                                                                                 
+                   │       PUBLISH QoS2, DUP(0) PacketID(111) payload("bb")          │            │
+                   ├────────────────────────────────────────────────────────────────►│            │
+                   │                                                                 │            │
+                   │                                                                 │            ▼
+                   ▼                                                                 ▼
 
-
-对于QoS1 QoS2都有重传，何时重传未收到响应的响应?
-
-在tcp未断开时，tcp负责重传，在tcp负责重传时进行消息重传是没有好处的，
-
-所以mqtt定义，QoS1 QoS2的消息重传必须在上次tcp连接断开后，进行新的tcp连接，并重传上次未响应的消息.
 
 ## 不同QoS的应用场景 
-
-QoS0 ：传输不重要可丢失的数据，如传感器
-QoS1 ：传输可重复的数据,或应用完成了去重
-QoS2 ：传输重要数据 
-
+- QoS0 ：传输不重要可丢失的数据，如传感器
+- QoS1 ：传输可重复的数据,或应用完成了去重
+- QoS2 ：传输重要数据 
 
 # 保留消息
 ## 为什么需要保留消息
-没有保留消息时，订阅者若后启动，是无法收到发布者的消息。
 
-## 保留消息的构成
-PUBLISH
- Retain    1
- TopicName demo
- Qos       0
- payload   hello
+                       broker收到消息，若Topic没有被订阅，则会立即丢弃消息
+                       若订阅者错过了发布，则必须等待下次发布才能收到消息
+                        
+       ┌────────┐       msg          ┌───────────────┐
+       │  client├───────────────────►│  broker       │
+       └────────┘                    │    sub        │
+                                     │       没有订阅│
+                                     └───────────────┘
 
-## 不属于会话
-保留消息不属于会话，即使发布端下线，保留消息依旧会存储在Broker.
+                       当使用保留消息后，broker会根据Topic存储一条消息
 
-若要删除保留消息需要发布一个同TopicName的普通消息（Retain 为 0）
+        ┌───────┐       msg          ┌───────────────────┐
+        │ client│───────────────────►│  broker           │
+        └───────┘                    │     Retain        │
+                                     │        Topic1:msg │
+                                     │        Topic2:msg │
+                                     └───────────────────┘
 
-PUBLISH
- Retain    0
- TopicName demo
- Qos       2
- payload   null
+                       当client订阅后，broker会根据Topic将保留的msg推送给client
 
-需要注意的是，这个普通消息的payload通常为null，而普通消息也会转发给订阅者，所以需要确保订阅者不会把此消息视为错误 
+                                      ┌─────────────────────────────────┐
+                                      │ broker                          │                         ┌────────┐
+                                      │  ┌──────────────┐   ┌──────────┐│────────────────────────►│ client │
+                                      │  │ Retain       │   │ sub      ││                         └────────┘
+                                      │  │    Topic1:msg│   │    Topic1││
+                                      │  │    Topic2:msg│   └──────────┘│
+                                      │  └──────────────┘               │
+                                      └─────────────────────────────────┘
 
-## message expiry interval
-mqtt5支持给保留消息设置过期时间
-
-PUBLISH
- Retain    1
- TopicName demo
- Qos       0
- payload   hello
- message expiry interval  5000s
-
-## Retain As Published
-
-默认情况下，Broker转发保留消息，Retain会被修改为0，若接收者是订阅者，这没有问题
-
-但是，接收者是Broker ，则会导致 业务希望桥接保留消息，实际桥接得到普通消息。
-
-若希望桥Broker也收到保留消息，这需要使用 Retain As Published 
-
-PUBLISH
- Retain    1
- TopicName demo
- Qos       0
- payload   hello
- Retain As Published 1
-
-## Retain Handling
-
-Retain Handling = 0
-订阅建立时发送保留消息
-
-Retain Handling = 1
-订阅建立时，若该订阅当前不存在则发送保留消息
-
-Retain Handling = 0
-订阅建立时不发送保留消息
-
-## 保留消息容易重复
-
-保留消息在订阅者订阅前发布
-                                                | <- Retain 1  payload(hello)
-client ---- Connect and SUBSCRIBE------> server |            
-client <--- Retain 1 payload(hello) ---- server | 订阅建立时，转发保留消息
-                 .....
-client ---- Connect and SUBSCRIBE------> server | 由于网络波动，订阅者断开连接后重新订阅
-client <--- Retain 1 payload(hello) ---- server | 订阅建立时，转发保留消息，保留消息未改变，订阅者收到重复消息
+## 保留消息的特点
+每个Topic只能存储一个消息
+默认保留消息会一直存储在broker中
 
 
-保留消息在订阅者订阅后发布
-
-client ---- Connect and SUBSCRIBE------> server |            
-                                                | <- Retain 1  payload(hello)
-client <--- Retain 0 payload(hello) ---- server | 订阅建立时，转发普通消息
-                 .....
-client ---- Connect and SUBSCRIBE------> server | 由于网络波动，订阅者断开连接后重新订阅
-client <--- Retain 1 payload(hello) ---- server | 订阅建立时，转发保留消息，保留消息未改变，订阅者收到重复消息
-
-如果消息内容是可重复的，如数据采集，则重复的保留消息没有副作用。
-
-但消息若不可重复，如金额消费，则会导致业务异常。
-
-重复的保留消息无法通过删除消息解决，因为有别的订阅者需要此保留消息。
-
-所以只能通过业务解决：常用方法是给保留消息一个生成时间戳，订阅者收到重复TopicName的保留消息时，需要根据时间错判断是否是重复的消息。
-
-
-## 保留消息减少设备发布次数
-利用保留消息，只需要在数据改变时，才发布
-
+##  重要字段
+- PUBLISH时涉及的字段
+  - TopicName demo
+    - 每个Topic只会存储一个保留消息
+  - Retain    1
+    - 1: 表示当前消息作为保留消息
+    - 0: 当前消息是普通消息
+  - message expiry interval
+    - 保留消息默认在broker 中一直存储
+    - 若有此字段，则设置broker存储此保留消息的最大时间
+  - Retain As Published
+    - 0: 默认情况，broker转发保留消息给client时，Retain字段会被设置未0，或清除
+    - 1: broker转发保留消息时，Retain字段保留为1
+- SUBSCRIBE涉及的字段
+  - Retain Handling
+    - 0: 订阅建立时发送保留消息
+    - 1: 订阅建立时，若订阅当前不存在则发送保留消息
+    - 2: 订阅建立时，不发送保留消息
 
 # 遗嘱消息
 ## 为什么要遗嘱消息
 由于Broker的存在，订阅者无法知道对端的情况，所以需要遗嘱消息，让发布者意外断线时有发布遗嘱的能力
 
-## 如何设置遗嘱消息
+## 重要字段
+- CONNECT
+  - Will Topic
+    - 遗嘱消息和普通消息一样，也需要设置Topic和QoS
+  - Will QoS
+  - Will Retain
+    - 将遗嘱消息设置为保留消息，这样任意订阅者上线都能立即获知发布者的在线情况
+  - Will Properties
+    - Will Delay interval
+      - 默认情况，broker检查到发布者异常断开，会立即发布遗嘱消息
+      - 此字段可以设置延迟发送遗嘱消息的时间
+      - 若在延迟时间内发送者重新上线，会取消发布遗嘱消息
+  - Will payload
+    - 遗嘱内容
 
-client在连接时可以指定遗嘱消息
-
-CONNECT
-    ClientID                123
-    CleanStart              true
-    Will Topic              will
-    Will QoS                0
-    Will Retain             false
-    Will Properties
-        Will Delay interval 300s
-    Will payload I          died
-
-## 客户端异常断开的情况
-1. 服务端检测到IO故障或网络故障
-2. 客户端在keepalive时间内未能通信
-3. 客户端在没有发送Reason code 为0的DISCONNECT报文的情况下关闭了网络
-4. 服务端在没有收到DISCONNECT报文的情况下主动关闭了网络
-
-## Will Delay interval
-mqtt3中没有此字段，当服务端检测到客户端异常断开后，会立即发送遗嘱给订阅者
-
-mqtt5中有此字段，当服务端检测到客户端异常断开后，会等待一段时间，若连接依旧没有恢复，则发送遗嘱
-
-## 遗嘱消息和会话
-遗嘱消息是会话的一部分，所以即使 
-Will Delay interval > Session expiry interval
-但当会话超时，遗嘱消息也会被视为超时而被发送
-
-这是很有用的，因为当使用持久会话时，会话的超时才是业务连接的断开，所以可以故意将 Will Delay interval 设置为大于 session expiry interval 。
-并在client发送DISCONNECT时，Reason code设置为 0x04 , 这表示client是正常断开连接，但仍然希望server发送遗嘱消息
-
-## 遗嘱消息和保留消息
-
-遗嘱消息一旦被转发，server就会删除对应的遗嘱消息，但无法保证订阅者一定在线。
-
-为了确保所有的订阅者可以收到遗嘱消息，可以使用 Will Retain字段，将遗嘱消息设置为保留消息。
-
-如此订阅了相关Topic的client，无论何时上线都能收到该Topic发布方离线通知
-
-## 场景用法
-
-client(发布方)
-连接时设置遗嘱
-    CONNECT
-        ClientID      a
-        Will Topic    client/a/status
-        Will Retain   true
-        Will payload  i'm offline
-
-当连接成功,发送保留消息
-    PUBLISH
-        ClientID      a
-        Topic         client/a/status
-        Retain        true
-        payload       i'm online
-
-client(订阅方)
-    SUBSCRIBE
-        Topic        client/a/status
-
-
+## broker如何判断是否发送遗嘱消息
+- 客户端正常断开不会发送遗嘱消息
+- 客户端异常断开会发送遗嘱消息，异常断开的情况
+  - 服务端检测到IO故障或网络故障
+  - 客户端在keepalive时间内未能通信
+  - 客户端在没有发送Reason code 为0的DISCONNECT报文的情况下关闭了网络
+  - 服务端在没有收到DISCONNECT报文的情况下主动关闭了网络
 
 # mqtt Broker 的使用
 ## mosquitto
