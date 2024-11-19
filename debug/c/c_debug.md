@@ -268,8 +268,8 @@ gdb ./程序 ./coredump文件
 但是不能查看args locals，所以只能使用切换栈帧和查看寄存器和反汇编方式判断问题
 
 
-# 内存问题
-## malloc
+# 处理内存问题
+## malloc的辅助函数
 malloc_stats() 是 malloc.h 中定义的
 
 ```c
@@ -285,7 +285,7 @@ malloc_stats() // 打印执行结果如下：
 /*max mmap bytes   =          0//mmap区域对应内存大小*/
 ```
 
-## gcc asan
+## gcc提供的内存检查库
 ```Makefile
 CFLAGS += -fsanitize=address
 LDFLAGS += -lasan -static-libasan
@@ -294,4 +294,30 @@ LDFLAGS += -lasan -static-libasan
 ```shell
 LD_PRELOAD=/usr/lib/libasan.so.4 ./test
 ```
+
+# 打桩
+## gcc wrap
+
+使用链接属性wrap，参数是需要打桩的函数名
+```Makefile
+LDFLAGS += -Wl,--wrap=malloc -Wl,--wrap=free
+```
+
+需要定义打桩函数
+```c
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size)
+{
+    void *ptr;
+    ptr = __real_malloc(size);
+    return ptr;
+}
+
+void __real_free(void *ptr);
+void __wrap_free(void *ptr)
+{
+    __real_free(ptr);
+}
+```
+
 
