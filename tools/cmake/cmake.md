@@ -231,3 +231,58 @@ FILE(GLOB PRJ_H "./test_xlog/*.h")
 add_executable(a.out ${PRJ_SRCS} ${PRJ_H})
 target_link_libraries(a.out xlog)
 ```
+
+## 分步构建
+
+```bash
+# 构建make
+cmake -S . -B build
+# 查看可选的分步构建
+cmake --build ./build --target help
+The following are some of the valid targets for this Makefile:
+... all (the default if no target is provided)
+... clean
+... depend
+... edit_cache
+... rebuild_cache
+... a.out
+... main.o
+... main.i
+... main.s
+
+# 预编译
+cmake --build ./build --target main.i
+# 编译
+cmake --build ./build --target main.s
+# 汇编
+cmake --build ./build --target main.o
+# 链接
+cmake --build ./build
+```
+## 调试
+make时显示具体的构建过程
+
+- 方法1 ： 开启缓存变量 CMAKE_VERBOSE_MAKEFILE
+```bash
+cmake_minimum_required(VERSION 3.20)
+project(firstdemo)
+add_executable(a.out main.cpp)
+
+# 开启调试
+set(CMAKE_VERBOSE_MAKEFILE ON)
+```
+- 方法2 : `cmake --build . -v`
+
+## 设置输出目录
+
+- CMAKE_CURRENT_LIST_DIR
+  - CMakeLists.txt的目录
+- CMAKE_LIBRARY_OUTPUT_DIRECTORY
+  - linux的动态库
+- CMAKE_RUNTIME_OUTPUT_DIRECTORY
+  - 执行程序输出路径
+- CMAKE_ARCHIVE_OUTPUT_DIRECTORY
+  - 归档路径windows的.lib dll pdb调试文件, linux的.a静态库
+
+
+

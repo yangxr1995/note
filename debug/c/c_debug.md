@@ -289,13 +289,22 @@ malloc_stats() // 打印执行结果如下：
 ```Makefile
 CFLAGS += -fsanitize=address
 LDFLAGS += -lasan -static-libasan
+
+-funwind-tables
 ```
 
 ```shell
 LD_PRELOAD=/usr/lib/libasan.so.4 ./test
+
 ```
 
+
+# 程序分析
+## gcc finstrument-functions
+
 # 打桩
+## LD_PRELOAD
+
 ## gcc wrap
 
 使用链接属性wrap，参数是需要打桩的函数名
