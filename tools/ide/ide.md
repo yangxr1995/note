@@ -2416,10 +2416,8 @@ cpack -G DEB
 dpkg -i nvim-linux64.deb
 ```
 
-
-
 ```shell
-apt install -y yarn npm luarocks
+apt install -y yarn npm luarocks python3.8 python3.8-pip python3.8-venv
 
 wget https://github.com/tree-sitter/tree-sitter/releases/download/0.16.0/tree-sitter-linux-x64.gz
 

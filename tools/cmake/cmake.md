@@ -284,5 +284,48 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 - CMAKE_ARCHIVE_OUTPUT_DIRECTORY
   - 归档路径windows的.lib dll pdb调试文件, linux的.a静态库
 
+```bash
+cmake_minimum_required(VERSION 3.20)
+project(test)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/lib")
+add_library(xlog SHARED ./xlog/xlog.h xlog/xlog.cpp)
+include_directories(./xlog)
+link_directories(./xlog/build/)
+add_executable(a.out ./test_xlog/main.cc)
+target_link_libraries(a.out xlog)
+```
+## sub_directory
 
+```bash
+├── CMakeLists.txt
+├── test_xlog
+│   ├── CMakeLists.txt
+│   └── main.cc
+└── xlog
+    ├── CMakeLists.txt
+    ├── xlog.cpp
+    └── xlog.h
 
+❯ cat CMakeLists.txt
+cmake_minimum_required(VERSION 3.20)
+project(test)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/lib")
+add_subdirectory(xlog)
+add_subdirectory(test_xlog)
+
+❯ cat test_xlog/CMakeLists.txt
+cmake_minimum_required(VERSION 3.20)
+project(test)
+include_directories(../xlog/)
+link_directories(../xlog/build)
+add_executable(${PROJECT_NAME} main.cc)
+target_link_libraries(${PROJECT_NAME} xlog)
+
+❯ cat xlog/CMakeLists.txt
+cmake_minimum_required(VERSION 3.20)
+project(xlog)
+add_library(${PROJECT_NAME} SHARED xlog.cpp xlog.h)
+```
+# cmake语法
