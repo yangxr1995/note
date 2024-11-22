@@ -7,21 +7,11 @@ at+cfun=0
 # 开机
 at+cfun=0
 ```
-jh42e568
 
 ## 检查SIM卡
-
-AT+GTSET="5GLANPCIE",2
-重启
-
 ```shell
 at+cpin?
 ```
-
-./logtool -d /dev/sdiag_nr -p /dev/slog_nr -i tftp:ip -a 0
-
-at+gtset="5GLANPCIE",1
-
 apn：5glan
 频点小区：152650，123
 
@@ -29,7 +19,7 @@ apn：5glan
 ```shell
 # 设置显示格式为
 at+cops=3,2
-# 显示搜索获得运营商
+# 扫描运营商
 at+cops=?
 # 自动选择运营商，并注册
 at+cops=0

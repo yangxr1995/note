@@ -329,3 +329,73 @@ project(xlog)
 add_library(${PROJECT_NAME} SHARED xlog.cpp xlog.h)
 ```
 # cmake语法
+## if
+
+```bash
+# 本质都是函数
+# if()
+# elseif()
+# else()
+# endif()
+if (<condition>)
+    <command>
+elseif (<condition>)
+    <command>
+else()
+    <command>
+endif()
+```
+
+### condition
+
+condition有三种类型
+- 常量 if (ON)
+  - 真: ON, YES, TRUE, Y 或非零数
+  - 假: OFF NO   FALSE N IGNORE NOUTFOUND 空串 以-NOUTFOUND结尾的
+- 变量 if(var1)
+  - 不用加 $()  
+  - 真: 存在且值为真
+  - 假: 不存在，或值为假
+- 字符串 if ("aaa")
+  - 值当成常量，按常量模式比较
+
+### AND OR NOT 做condition
+
+```bash
+if (NOT <condition>)
+endif()
+
+if (<condition1> AND <condition2>)
+endif()
+
+if (<condition1> OR <condition2>)
+endif()
+
+if ((<condition1> OR <condition2>) AND <condition3>)
+endif()
+
+```
+
+### 条件判断为condition
+
+- 一元判断
+  - EXIST
+  - COMMAND
+  - DEFINED
+- 二元判断
+  - STREQUAL
+  - EQUAL
+  - LESS
+  - LESS_EQUAL
+  - GREATER
+  - GREATER_EQUAL
+  - VERSION_EQUAL
+  - VERSION_LESS
+  - VERSION_GREATER
+  - MATCHES
+
+## 缓存变量
+
+
+
+
