@@ -2424,3 +2424,80 @@ wget https://github.com/tree-sitter/tree-sitter/releases/download/0.16.0/tree-si
 git clone git@github.com:yangxr1995/my-nvim-cfg.git ~/.config/nvim/
 ```
 
+### nvim 优化启动速度
+
+
+```lua
+-- 使用keys实现lazy
+return {
+    "ivechan/telescope-gtags",
+    dependencies = {'nvim-telescope/telescope.nvim'},
+    -- 使用lazy的keys，当用户键入时，加载插件，并绑定keymap
+    keys = {
+        { "<leader>gd", mode = "n", function () require("telescope-gtags").showDefinition() end, desc = "gtags查找定义" },
+        { "<leader>gr", mode = "n", function () require("telescope-gtags").showReference() end, desc = "gtags查找引用" }
+    },
+    -- lazy不支持的部分，config中定义
+    config = function()
+        local status_ok, gtags = pcall(require, "telescope-gtags")
+        if not status_ok then
+            print("没有找到 telescope-gtags")
+            return
+        end
+        -- 不要使用nvim的keymap，因为不会有lazy效果
+        -- local opts = { noremap = true, silent = true }
+        -- vim.keymap.set('n', '<leader>gd', gtags.showDefinition, opts)
+        -- vim.keymap.set('n', '<leader>gr', gtags.showReference, opts)
+        gtags.setAutoIncUpdate(true)
+    end
+},
+
+-- ft，当打开匹配的后缀匹配文件时加载插件
+return {
+        "iamcco/markdown-preview.nvim",
+        cmd = { "MarkdownPreviewToggle", "MarkdownPreview", "MarkdownPreviewStop" },
+        build = "cd app && yarn install",
+        init = function()
+            vim.g.mkdp_filetypes = { "markdown" }
+        end,
+        ft = { "md", "markdown" },
+        -- 默认lazy是false，当keys ft event 等触发或者手动调用require("xxx")时才加载插件
+        lazy = true,
+}
+
+-- event
+return {
+        "kylechui/nvim-surround",
+        -- 当事件触发时加载插件
+        -- 常用事件
+        -- VeryLazy : 最后自动加载
+        -- InsertEnter : 键入文本时加载
+        -- CmdlineEnter : 键入命令行时加载
+        event = "VeryLazy",
+        config = function()
+            require("nvim-surround").setup({
+                -- Configuration here, or leave empty to use defaults
+            })
+        end
+}
+
+-- cmd
+{
+        'xiyaowong/transparent.nvim',
+        cmd = {"Trans"},
+        -- 命令行键入Trans时加载插件
+        config = function()
+            require("transparent").setup({
+                groups = { -- table: default groups
+                    'Normal', 'NormalNC', 'Comment', 'Constant', 'Special', 'Identifier',
+                    'Statement', 'PreProc', 'Type', 'Underlined', 'Todo', 'String', 'Function',
+                    'Conditional', 'Repeat', 'Operator', 'Structure', 'LineNr', 'NonText',
+                    'SignColumn', 'CursorLine', 'CursorLineNr', 'StatusLine', 'StatusLineNC',
+                    'EndOfBuffer',
+                },
+                extra_groups = {},   -- table: additional groups that should be cleared
+                exclude_groups = {}, -- table: groups you don't want to clear
+            })
+        end
+    }
+```
