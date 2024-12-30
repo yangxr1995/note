@@ -153,3 +153,38 @@ OK
 总结而言，5G NSA是一种过渡方案，主要依赖于现有的4G基础设施，而5G SA则是完全基于5G技术的独立网络架构。
 
 
+# PCI
+PCI代表“Physical Cell ID”（物理小区ID）。它是一个用于标识移动网络中每个小区的唯一编号，帮助用户设备（UE）识别和连接到特定的基站。
+
+## 锁小区
+### 广和通
+
+GTCELLLOCK
+此命令用于强制 UE 注册特定的小区（固定的小区和频率）。
+`AT+GTCELLLOCK=<mode>[,<rat>,<type>,<earfcn>[,<PCI>][,<scs>][,<nrband>]]`
+- mode 功能开关
+  - 0:关闭此功能
+  - 1:开启此功能
+- rat 制式
+  - 0:LTE
+  - 1:NR
+- type 加锁类型
+  - 0:锁PCI
+  - 1:锁频点
+- earfcn 频点
+  - 0 - 4294967295
+- PCI
+  - 物理小区ID
+  - RAT=0时，0-503 对应LTE
+  - RAT=1时，0-1007 对应NR
+- scs 子载波间隔
+  - 0:15kHz
+  - 1:30kHz
+- nrband NR频段
+  - 501 BAND_NR_1
+  - 502 BAND_NR_2
+  - ...
+  - 5010 BAND_NR_10
+  - 50512 BAND_NR_512
+
+
