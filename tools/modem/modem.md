@@ -1,12 +1,12 @@
 # 模组拨号上网
 ## 复位模组
 
-```shell
-# 关机
-at+cfun=0
-# 开机
-at+cfun=0
-```
+
+`at+cfun=<num>`:
+- 0 :  最小功能
+- 1 : 完整功能
+- 4 : 飞线模式
+- 15 : 复位
 
 ## 检查SIM卡
 ```shell
@@ -152,6 +152,51 @@ OK
 5G SA：提供更高的速度、更低的延迟，以及更多的创新应用，如网络切片和更高级别的QoS（服务质量）。
 总结而言，5G NSA是一种过渡方案，主要依赖于现有的4G基础设施，而5G SA则是完全基于5G技术的独立网络架构。
 
+
+# 获得小区信息
+
+未注册或注册成功都可以使用
+
+```txt
+ LTE/eMTC/NB-IoT（a maximum of ten LTE cells are supported）
+◦ LTE/eMTC/NB-IoT service cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<earfcn>,<physicalcellId>,<band>,<bandwidth>,<rssnr_value>,<rxlev>,<rsrp>,<rsrq>
+◦ LTE/eMTC/NB-IoT neighbor cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<earfcn>,<physicalcellId>,<bandwidth>,<rxlev>,<rsrp>,<rsrq>
+
+ NR Cell（a maximum of ten NR cells are supported）
+◦ NR service cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<narfcn>,<physicalcellId>,<band>,<bandwidth>,<ss-sinr>,<rxlev>,<ss-rsrp>,<ss-rsrq>
+◦ NR neighbor cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<narfcn>,<physicalcellId>,<ss-sinr>,<rxlev>,<ss-rsrp>,<ss-rsrq>
+```
+
+- IsServiceCell  判断有无服务小区
+  - 1 : 有  
+  - 0 : 无
+- rat :  接入技术
+  - 0：无效的网络
+  - 1：GSM
+  - 2：WCDMA
+  - 3：TDSCDMA
+  - 4：LTE
+  - 5：eMTC
+  - 6：NB-IoT
+  - 7：CDMA
+  - 8：EVDO
+- cell_id 当前小区ID
+- mcc 国家码
+- mnc 运营商码
+- lac/tac 位置区域码
+- arfn/earfcn 绝对射频频道号
+- basic/physicalcellId(PCID) 基站识别码，物理小区ID
+- band 当前注册的频段
+- rxlev 网络信号范围
+- rssnr_value 信噪比
+- rsrp 接受功率
+- rsrq 接受质量
+- rssi 信号接受指示
+- rscp 信号编码率
 
 # PCI
 PCI代表“Physical Cell ID”（物理小区ID）。它是一个用于标识移动网络中每个小区的唯一编号，帮助用户设备（UE）识别和连接到特定的基站。

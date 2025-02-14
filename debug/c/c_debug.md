@@ -320,6 +320,10 @@ LD_PRELOAD=/usr/lib/libasan.so.4 ./test
 
 # 程序分析
 ## gcc finstrument-functions
+```Makefile
+CFLAGS += -finstrument-functions
+LDFLAGS += -rdynamic -pthread
+```
 
 # 打桩
 ## LD_PRELOAD

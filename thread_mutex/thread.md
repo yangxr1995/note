@@ -1582,7 +1582,7 @@ cpu core1对nShared1的CAS操作就不会被其他core对nShared2的修改所影
 
 使用 __thread 修饰的符号会被编译为per thread
 
-int __thread a;
+__thead int a;
 void *do_work()
 {
     ++a; // a 全部是1
