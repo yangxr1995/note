@@ -195,7 +195,13 @@ ebtables命令参数指定要在使用-t参数定义的表上执行的操作。�
 以下命令行参数构成规则规范（用于添加和删除命令中）。在规范之前，“!”选项反转该规范的测试。除了这些标准规则规范之外，还有一些其他有趣的命令行参数。请参见匹配扩展和观察器扩展。
 
 ###  -p, --protocol [!] protocol
-创建帧的协议。可以是一个大于0x0600的十六进制数、一个名称（例如ARP）或LENGTH。以太网帧的协议字段可用于表示标头的长度（802.2/802.3网络）。当该字段的值小于或等于0x0600时，该值等于标头的大小，不应将其用作协议号。相反，假定使用协议字段作为长度字段的所有帧都被视为具有相同的“协议”。在ebtables中，这些帧的协议名称是LENGTH。可以使用/etc/ethertypes文件显示协议的可读字符，而不是十六进制数。例如，0x0800将表示为IPV4。对于此文件的使用不区分大小写。有关更多信息，请参见该文件。--proto标志是此选项的别名。
+创建帧的协议。可以是一个大于0x0600的十六进制数、一个名称（例如ARP）或LENGTH。
+以太网帧的协议字段可用于表示标头的长度（802.2/802.3网络）。
+当该字段的值小于或等于0x0600时，该值等于标头的大小，不应将其用作协议号。
+相反，假定使用协议字段作为长度字段的所有帧都被视为具有相同的“协议”。
+在ebtables中，这些帧的协议名称是LENGTH。可以使用/etc/ethertypes文件显示协议的可读字符，而不是十六进制数。
+例如，0x0800将表示为IPV4。对于此文件的使用不区分大小写。
+有关更多信息，请参见该文件。--proto标志是此选项的别名。
 
 ### -i, --in-interface [!] name
 通过接收帧的接口（桥端口）（此选项在INPUT、FORWARD、PREROUTING和BROUTING链中非常有用）。如果接口名称以“+”结尾，则任何以此名称开头（忽略“+”）的接口名称都将匹配。--in-if标志是此选项的别名。
@@ -254,35 +260,35 @@ DSAP和SSAP是两个一个字节的802.3字段。字节始终相等，因此只�
 ### arp
 指定（R）ARP字段。协议必须指定为ARP或RARP。
 
---arp-opcode [!] opcode
+`--arp-opcode [!] opcode`
 
 （R）ARP操作码（十进制或字符串，有关详细信息，请参见ebtables -h arp）。
 
---arp-htype [!] hardware type
+`--arp-htype [!] hardware type`
 
 硬件类型，可以是十进制或字符串以太网（将类型设置为1）。大多数（R）ARP数据包都具有以太网作为硬件类型。
 
---arp-ptype [!] protocol type
+`--arp-ptype [!] protocol type`
 
 用于（R）ARP的协议类型（十六进制或字符串IPv4，表示0x0800）。大多数（R）ARP数据包都具有协议类型IPv4。
 
---arp-ip-src [!] address[/mask]
+`--arp-ip-src [!] address[/mask]`
 
 （R）ARP IP源地址规范。
 
---arp-ip-dst [!] address[/mask]
+`--arp-ip-dst [!] address[/mask]`
 
 （R）ARP IP目标地址规范。
 
---arp-mac-src [!] address[/mask]
+`--arp-mac-src [!] address[/mask]`
 
 （R）ARP MAC源地址规范。
 
---arp-mac-dst [!] address[/mask]
+`--arp-mac-dst [!] address[/mask]`
 
 （R）ARP MAC目标地址规范。
 
-[!] --arp-gratuitous
+`[!] --arp-gratuitous`
 
 检查ARP伪造数据包：检查ARP标头内的IPv4源地址和IPv4目标地址是否相等。
 

@@ -534,6 +534,8 @@ new_table = xt_register_table(net, table, &bootstrap, newinfo);
 并且回调函数为 iptable_filter_hook 
 
 
+
+
 # nf hook
 ## 内核使用 nf hook 
 协议栈在多处使用 NF_HOOK 留下hook点

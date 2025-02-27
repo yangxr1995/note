@@ -119,6 +119,33 @@ root@ubuntu:~/test# ip route get from 172.168.13.2 to 172.168.10.5 iif veth3-
     cache iif veth3-
 ```
 
+### 路由丢包
+路由阶段可能会丢包
+```shell
+root@ubuntu:~/netns-router-lab# ip route
+default via 172.168.10.1 dev rlab-r2 onlink
+172.168.10.0/24 dev rlab-r2 proto kernel scope link src 172.168.10.3
+172.168.20.0/24 dev br0 proto kernel scope link src 172.168.20.3
+```
+
+路由时会考虑数据包的源地址和输入设备，如果输入设备是WAN口，说明源地址可以为任意地址，
+如果不是WAN口，源地址必须为对应网段的地址。
+```shell
+root@ubuntu:~/netns-router-lab# ip route get to 8.8.8.8 from 192.168.0.2 iif rlab-r2
+8.8.8.8 from 192.168.0.2 via 172.168.10.1 dev rlab-r2
+    cache <redirect> iif rlab-r2
+root@ubuntu:~/netns-router-lab# ip route get to 8.8.8.8 from 192.168.0.2 iif br0
+RTNETLINK answers: Invalid cross-device link
+root@ubuntu:~/netns-router-lab# ip route get to 8.8.8.8 from 192.168.0.2 iif rlab-pc2-
+RTNETLINK answers: Invalid cross-device link
+root@ubuntu:~/netns-router-lab# ip route get to 8.8.8.8 from 172.168.20.2 iif rlab-pc2-
+RTNETLINK answers: Invalid cross-device link
+root@ubuntu:~/netns-router-lab# ip route get to 8.8.8.8 from 172.168.20.2 iif br0
+8.8.8.8 from 172.168.20.2 via 172.168.10.1 dev rlab-r2
+    cache iif br0
+```
+
+
 ### 路由的 res.type
 IP层收到数据包后，要判断数据包是发送给自己还是单播或广播或组播，通过 ip_route_input 
 ```c
