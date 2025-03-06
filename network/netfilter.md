@@ -1,8 +1,9 @@
 # 初步介绍 netfilter
 ## netfilter 的位置
 
-netfilter本不属于网络层，但通过hook的方式为网络层提供服务。
-用户通过iptables命令，利用 ip_tables模块操作netfilter模块的hook链，从而处理数据包。
+协议栈通过调用NF_HOOK，将skb交给netfilter处理，netfilter处理完成后，可能将skb返还给协议栈，也可能消耗了skb。
+
+用户通过iptables命令，和ip_tables模块交互，ip_tables模块调整netfilter模块的hook链，从而实现对skb处理逻辑的调整。
 
              ┌───────┐         ┌────────────┐ setsockopt
              │socket │         │iptables命令│ getsockopt
@@ -34,6 +35,8 @@ netfilter本不属于网络层，但通过hook的方式为网络层提供服务�
 
 ### hook点
 
+网络层在5个位置调用了NF_HOOK，以将skb的所有权交给netfilter
+
                  ┌──────────────────────────────────────────────┐
                  │                   传输层                     │
                  └───────────────────────────────┬──────────────┘
@@ -58,18 +61,17 @@ netfilter本不属于网络层，但通过hook的方式为网络层提供服务�
       └────────────────────────────────────────────────────────────────────┘
 
 ### 返回值
-网络层将数据包交给netfilter后，netfilter可以方向，丢弃数据包，但必须告诉网络层数据包的死活情况。
-以下是几种可能的值:
-- NF_ACCEPT 继续正常传输数据报。这个返回值告诉 Netfilter：到目前为止，该数据包还是被接受的并且该数据包应当被递交到网络协议栈的下一个阶段。
-- NF_DROP 丢弃该数据报，不再传输。
-- NF_STOLEN 模块接管该数据报，告诉Netfilter“忘掉”该数据报。该回调函数将从此开始对数据包的处理，并且Netfilter应当放弃对该数据包做任何的处理。但是，这并不意味着该数据包的资源已经被释放。这个数据包以及它独自的sk_buff数据结构仍然有效，只是回调函数从Netfilter 获取了该数据包的所有权。
+进入netfilter的skb可能被netfilter消耗掉，也可能返回协议栈，netfilter通过返回值告知协议栈skb的现状，具体返回值包括以下5种:
+- NF_ACCEPT 继续正常传skb。这个返回值告诉 Netfilter：到目前为止，该数据包还是被接受的并且该数据包应当被递交到网络协议栈的下一个阶段。
+- NF_DROP 丢弃该skb，不再传输。
+- NF_STOLEN 模块接管该skb，告诉Netfilter“忘掉”该skb。该回调函数将从此开始对skb的处理，并且Netfilter应当放弃对该skb做任何的处理。但是，这并不意味着该数据包的资源已经被释放。这个数据包以及它独自的sk_buff数据结构仍然有效，只是回调函数从Netfilter 获取了该数据包的所有权。
 - NF_QUEUE 对该数据报进行排队(通常用于将数据报给用户空间的进程进行处理)
 - NF_REPEAT 再次调用该回调函数，应当谨慎使用这个值，以免造成死循环。
 
 ## 详解hook
 
-### NF_HOOK
-IP层通过调用NF_HOOK，将数据包交给netfilter处理
+### NF_HOOK : 协议栈到 netfilter
+IP层通过调用NF_HOOK，来标记hook点，此处的skb交给netfilter处理
 ```c
 // @ pf：协议族名，Netfilter架构同样可以用于IP层之外，因此这个变量还可以有诸如PF_INET6，PF_DECnet等名字。
 // @ hook：HOOK点的名字，对于IP层，就是取上面的五个值；
@@ -91,8 +93,8 @@ NF_HOOK(uint8_t pf, unsigned int hook, struct net *net, struct sock *sk, struct 
 }
 ```
 
-### nf_hook
-netfilter获得数据包后，根据数据包的协议族找到对应的hook链，进行处理
+### nf_hook : netfilter处理数据包
+netfilter获得数据包后，根据数据包的协议族找到对应的hooks链，根据hook点，找到具体的hook链，使用具体的hook链对skb进行处理
 ```c
 /**
  * nf_hook - 调用 netfilter 捕获点
@@ -143,6 +145,7 @@ int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state,
 	for (; s < e->num_hook_entries; s++) {
         // 由s索引到当前规则，对skb进行检查
 		verdict = nf_hook_entry_hookfn(&e->hooks[s], skb, state);
+            return entry->hook(entry->priv, skb, state);
         // 根据规则的结果执行内置目标
 		switch (verdict & NF_VERDICT_MASK) {
 		case NF_ACCEPT:
@@ -211,13 +214,60 @@ struct nf_hook_entries {
  * 而在处理数据包路径过程中不需要：struct nf_hook_entries_rcu_head     head
  */
 };
+
+struct nf_hook_ops {
+	/* User fills in from here down. */
+	nf_hookfn		*hook;
+	struct net_device	*dev;
+	void			*priv;
+	u_int8_t		pf;
+	unsigned int		hooknum;
+	/* Hooks are ordered in ascending priority. */
+	int			priority;
+};
+
+struct nf_hook_entry {
+	nf_hookfn			*hook;
+	void				*priv;
+};
 ```
+# 从netfilter 到 iptables
+- netfilter只有链的概念
+  - netfilter提供的`struct netns_nf`，实现了不同协议族的`hook[链][顺序]`
+- iptables在其上增加了table的概念。
+  - xt_table提供的`struct netns_xt`，为实现不同协议族的不同功能的表提供支持
 
-# 表的创建 filter为例
-iptables 有两个基础:
-- netfilter提供的`struct netns_nf`，用户可以向其hook点插入hook方法
-- xt_table提供的`struct netns_xt`，用户可以在其上创建表
+## 什么是表
+表是相同功能hook的统一入口
 
+表首先转换自己为 nf_hook_ops ，再加入nf的对应链
+
+如filter表将自己加入nf 的 INPUT, OUTPUT, FORWARD三个位置，处理方法统一为 `iptable_filter_hook`
+
+```c
+#define FILTER_VALID_HOOKS ((1 << NF_INET_LOCAL_IN) | \
+			    (1 << NF_INET_FORWARD) | \
+			    (1 << NF_INET_LOCAL_OUT))
+
+static const struct xt_table packet_filter = {
+	.name		= "filter",
+	.valid_hooks	= FILTER_VALID_HOOKS,
+	.me		= THIS_MODULE,
+	.af		= NFPROTO_IPV4,
+	.priority	= NF_IP_PRI_FILTER,
+	.table_init	= iptable_filter_table_init,
+};
+
+static unsigned int
+iptable_filter_hook(void *priv, struct sk_buff *skb,
+		    const struct nf_hook_state *state)
+{
+	return ipt_do_table(skb, state, state->net->ipv4.iptable_filter);
+}
+
+static int __init iptable_filter_init(void)
+	filter_ops = xt_hook_ops_alloc(&packet_filter, iptable_filter_hook);
+```
 ## xt_table
 ### xt_table 初始化
 对init_net的 netns_xt的各个协议族链表初始化
@@ -228,14 +278,14 @@ static int __init xt_init(void)
             INIT_LIST_HEAD(&net->xt.tables[i]);
 ```
 
-### xt_hook_ops_alloc
+### xt_hook_ops_alloc : 从xt_table 到 nf_hook_ops
 
-xt_table模块提供了 xt_hook_ops_alloc 方法，用于将 xt_table 转换成功 netns_nf可用的 nf_hook_ops
+xt_table模块提供了 xt_hook_ops_alloc 方法，用于将表加入netfilter，具体来说是将 xt_table 转换成功 netns_nf 可用的 nf_hook_ops，nf_hook_ops可以用于加入netns_nf的对应hook链
 
 ```c
 /**
  * xt_hook_ops_alloc - 设置新表的钩子
- * @table: 需要设置钩子所需的元数据表
+ * @table: 需要设置钩子所需的原数据表
  * @fn: 钩子函数
  *
  * 此函数将创建 x_table 所需的 nf_hook_ops，以便将其传递给 xt_hook_link_net()。
@@ -246,6 +296,7 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 	struct nf_hook_ops *ops;
 	uint8_t hooknum;
 
+    // 根据表插入链的数量，创建对应的多个nf_hook_ops
     // hweight32 计算32bit中置一位的个数
 	uint8_t i, num_hooks = hweight32(hook_mask);
 
@@ -265,8 +316,6 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 	return ops;
 }
 ```
-
-
 ### packet_filter —— filter表
 iptables 的 filter 模块通过定义 packet_filter 来定义自己的表。
 之后需要将 packet_filter加入 xt_table 模块。
@@ -289,7 +338,7 @@ iptables 的 filter 模块定义 filter_ops 用于插入 netfilter 的hook点
 filter_ops 的初始化通过 xt_hook_ops_alloc 完成
 
 ```c
-static struct nf_hook_ops *filter_ops __read_mostly;
+static struct nf_hook_ops *filter_ops __read_mostly; // nf_hook_ops数组
 ```
 
 filter模组中利用 packet_filter 构造 filter_ops ，将 iptable_filter_hook设置为回调函数
@@ -341,7 +390,7 @@ struct nf_hook_entries {
 // 在xt_tables注册filter表
 // 在nf注册filter的3个hook点
 static int __init iptable_filter_init(void)
-    // 创建hook操作
+    // 创建 nf_hook_ops 数组
 	filter_ops = xt_hook_ops_alloc(&packet_filter, iptable_filter_hook);
     // 向xt_table和netfilter进行注册
     iptable_filter_table_init(net);
@@ -532,8 +581,6 @@ new_table = xt_register_table(net, table, &bootstrap, newinfo);
 利用xt_table提供的xt_hook_ops_alloc，将xt_table类型的 packet_filter构造出 nf_hook_ops 类型的filter_ops，
 再将filter_ops加入netfilter 对应的数组,
 并且回调函数为 iptable_filter_hook 
-
-
 
 
 # nf hook

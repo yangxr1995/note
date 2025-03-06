@@ -328,6 +328,7 @@ LDFLAGS += -rdynamic -pthread
 # 打桩
 ## LD_PRELOAD
 
+
 ## gcc wrap
 
 使用链接属性wrap，参数是需要打桩的函数名
