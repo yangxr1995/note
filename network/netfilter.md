@@ -289,7 +289,6 @@ struct net
         struct xt_table		*nat_table;
 ```
 
-### 
 在ip_table中xt_table的private会被设置为 xt_table_info，
 xt_table_info记录了表的所有hook点的规则链
 ```c
@@ -436,7 +435,7 @@ struct nf_hook_entry {
 };
 ```
 
-## filter表完成注册
+## ipt_filter的初始化
 ```c
 // 在xt_tables注册filter表
 // 在nf注册filter的3个hook点
@@ -445,17 +444,53 @@ static int __init iptable_filter_init(void)
 	filter_ops = xt_hook_ops_alloc(&packet_filter, iptable_filter_hook);
     // 向xt_table和netfilter进行注册
     iptable_filter_table_init(net);
+        struct ipt_replace *repl;
+        // 创建filter表的替换表
         repl = ipt_alloc_initial_table(&packet_filter);
-        err = ipt_register_table(net, &packet_filter /* table */, repl, filter_ops,
+        ((struct ipt_standard *)repl->entries)[1].target.verdict =
+            forward ? -NF_ACCEPT - 1 : -NF_DROP - 1;
+        err = ipt_register_table(net, &packet_filter, repl, filter_ops,
                      &net->ipv4.iptable_filter);
-            // newinfo是实际存放iptables规则的
+
+            struct xt_table_info *newinfo;
+            struct xt_table_info bootstrap = {0}; // 空的规则表
+            struct xt_table *new_table;
+            void *loc_cpu_entry;
+            // 创建记录表规则的实际对象 newinfo
             newinfo = xt_alloc_table_info(repl->size);
-            // 向xt注册新的filter表
+                info = kvmalloc(sz, GFP_KERNEL_ACCOUNT);
+                memset(info, 0, sizeof(*info));
+                info->size = size;
+                return info;
+            // 将规则拷贝到newinfo
+            loc_cpu_entry = newinfo->entries;
+            memcpy(loc_cpu_entry, repl->entries, repl->size);
+            // 根据用户空间传入的 repl设置内核空间使用的newinfo
+            // 并且确保设置的合法行
+            ret = translate_table(net, newinfo, loc_cpu_entry, repl);
+            // 进行filter表的注册
             new_table = xt_register_table(net, table, &bootstrap, newinfo);
-            // 在nf上注册filter的3个hook点
+                struct xt_table_info *private;
+                struct xt_table *t, *table;
+                // 拷贝filter表
+                table = kmemdup(input_table, sizeof(struct xt_table), GFP_KERNEL);
+                // 当前表的规则是空
+                table->private = bootstrap;
+                // 将newinfo设置为表的规则
+                xt_replace_table(table, 0, newinfo, &ret);
+                    table->private = newinfo;
+                // 将表加入网络命令空间的xt
+                list_add(&table->list, &net->xt.tables[table->af]);
+                // 返回完成注册的表
+                return table;
+            // 设置网络命名空间的iptables表，如果是filter则为
+            // net->ipv4.iptable_filter = new_table;
+            WRITE_ONCE(*res, new_table);
+            // 进行nf的注册
+            // 表通常有多个hook点，所以注册多个hook点
             ret = nf_register_net_hooks(net, ops, hweight32(table->valid_hooks));
-            // 更新netns的 iptable_filter 表
-        &net->ipv4.iptable_filter = new_table;
+                for (i = 0; i < n; i++)
+                    err = nf_register_net_hook(net, &reg[i]);
 ```
 
 ### 向xt_table注册
@@ -873,6 +908,39 @@ struct xt_standard_target {
 	int verdict; // 判决
 };
 ```
+
+### ipt_replace
+用于iptables整张表替换的数据结构，主要见于用户空间配置规则时进行表的替换。
+```c
+struct ipt_replace {
+    char name[XT_TABLE_MAXNAMELEN];       // 表名（如 "filter"）
+    unsigned int valid_hooks;             // 有效的钩子位掩码（如 NF_INET_LOCAL_IN）
+    unsigned int num_entries;             // 新规则的总数
+    unsigned int size;                    // 新规则数据的总大小
+    unsigned int hook_entry[NF_INET_NUMHOOKS]; // 各钩子点的规则入口偏移
+    unsigned int underflow[NF_INET_NUMHOOKS];  // 各钩子点的规则下溢偏移
+    unsigned int num_counters;            // 计数器数量
+    struct xt_counters __user *counters;  // 用户空间传递的计数器指针
+    unsigned char entries[];              // 实际规则数据（ipt_entry 数组）
+};
+```
+
+### xt_table_info
+iptables中记录表规则的实际结构
+```c
+struct xt_table_info {
+    unsigned int size;       // 规则数据总大小（字节）
+    unsigned int number;     // 当前规则条目总数
+    unsigned int initial_entries;  // 初始规则数（用于优化）
+
+    // 每个钩子点的规则入口偏移和下溢偏移
+    unsigned int hook_entry[NF_INET_NUMHOOKS];
+    unsigned int underflow[NF_INET_NUMHOOKS]; // 防止规则链越界，确保规则链结束在正确的位置
+
+    void *entries[];         // 规则数据（存储实际规则链 ipt_entry 的数组）
+};
+```
+
 
 
 ## 防火墙算法
