@@ -435,7 +435,7 @@ struct nf_hook_entry {
 };
 ```
 
-## ipt_filter的初始化
+# ipt_filter的初始化
 ```c
 // 在xt_tables注册filter表
 // 在nf注册filter的3个hook点
@@ -709,31 +709,29 @@ new_table = xt_register_table(net, table, &bootstrap, newinfo);
 3）如果规则匹配则执行的目标操作 
 */
 struct ipt_entry {
-    // 用于通用匹配的IP关键匹配项
-	struct ipt_ip ip;
-
-    /* 标记我们需要关注的字段。*/
-	unsigned int nfcache;
-
+    // IP头匹配条件（源/目标IP、协议等）
+    struct ipt_ip ip;          
+    // 缓存标记（内核内部使用）
+    unsigned int nfcache;      
     /*ipt_entry 和 匹配 的大小之和*/
-    // 用于根据ipt_entry找到他的ipt_entry_target
-	__u16 target_offset;
+    // 从当前entry到target的偏移量
+    __u16 target_offset;       
     /* ipt_entry、matches 和 target 的总大小 */
-    // 用于找到下一条ipt_entry
-	__u16 next_offset;
-
-    /* 返回指针 */
-	unsigned int comefrom;
-
-    /* 包和字节计数器。 */
-	struct xt_counters counters;
-
+    // 当前entry总长度（用于遍历）
+    __u16 next_offset;         
+    // 规则来源标记（调试用）
+    unsigned int comefrom;     
+    // 计数器（包数、字节数统计）
+    struct xt_counters counters; 
     // 动态数组，内容为 ipt_entry_match(s) 和 ipt_entry_target
-	unsigned char elems[0];
+    unsigned char elems[0];    
 };
-
+```
+#### ipt_ip
+iptables标准匹配
+```c
 // 必须初始化为零
- struct ipt_ip {
+struct ipt_ip {
     /* 源IP和目的IP地址 */
     struct in_addr src, dst;
     /* 源和目的IP地址的掩码 */
@@ -752,75 +750,71 @@ struct ipt_entry {
 ```
 
 ### ipt_entry_match
+该结构是Linux内核Netfilter框架中实现iptables扩展匹配模块的核心数据结构，用于描述一条规则中的匹配条件
+
 匹配分为标准匹配和扩展匹配.
-标准匹配只会检查IP地址，端口等通用信息，不会用到xt_match, 所以ipt_entry_match的match为NULL
-扩展匹配就需要自己是实现 xt_match对象和相关回调函数
+- 标准匹配只会检查IP地址，端口等通用信息，不会用到xt_match, 所以ipt_entry_match的match为NULL
+- 扩展匹配就需要自己是实现 xt_match对象和相关回调函数
+
+如下就是扩展匹配
+```bash
+-m tcp --dport 80
+```
+
 ```c
 #define ipt_entry_match xt_entry_match
 struct xt_entry_match {
-	union {
-		struct {
-			__u16 match_size;
-
-			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
-			__u8 revision;
-		} user;
-		struct {
-			__u16 match_size;
-
-			/* Used inside the kernel */
-            // 扩展match
-			struct xt_match *match;
-		} kernel;
-
-		/* Total length */
-		__u16 match_size;
-	} u;
-
-	unsigned char data[0];
+    union {
+        struct {
+            __u16 match_size;     // 匹配结构总大小
+            char name[XT_EXTENSION_MAXNAMELEN]; // 用户空间使用的扩展模块名（如"tcp"）
+            __u8 revision;        // 模块版本号
+        } user;
+        struct {
+            __u16 match_size;
+            // 决定是否是扩展匹配
+            struct xt_match *match; // 内核空间指向匹配模块的指针（如xt_tcp_mt_reg）
+        } kernel;
+        __u16 match_size;          // 总长度（兼容性设计）
+    } u;
+    unsigned char data[0];         // 柔性数组，存储模块私有数据（如端口范围）
 };
-
-
+```
+#### xt_match
+ Linux Netfilter框架中扩展匹配模块的核心描述结构
+```c
 struct xt_match {
-	struct list_head list;
+    struct list_head list;        // 内核链表节点，用于模块注册管理
 
-	const char name[XT_EXTENSION_MAXNAMELEN];
-	u_int8_t revision;
+    const char name[XT_EXTENSION_MAXNAMELEN]; // 匹配模块名称（如"tcp"）
+    u_int8_t revision;            // 模块版本号（兼容性控制）
 
-    /* 返回 true 或 false：返回 FALSE 并设置 *hotdrop 为 1 来强制立即丢弃数据包。 */
-    /* 参数在 2.6.9 版本后发生变化，因为现在必须处理非线性 skb，并使用 skb_header_pointer 和 skb_ip_make_writable。 */
-    // 扩展match的具体match方法
-	bool (*match)(const struct sk_buff *skb,
-		      struct xt_action_param *);
+    bool (*match)(const struct sk_buff *skb, struct xt_action_param *); // 核心匹配函数
+    int (*checkentry)(const struct xt_mtchk_param *);  // 规则加载时的校验函数
+    void (*destroy)(const struct xt_mtdtor_param *);   // 规则删除时的清理函数
 
-    /* 当用户尝试插入这种类型的条目时被调用。*/
-	int (*checkentry)(const struct xt_mtchk_param *);
-
-    /* 当这种类型的条目被删除时调用。*/
-	void (*destroy)(const struct xt_mtdtor_param *);
 #ifdef CONFIG_COMPAT
-    /* 当用户空间的对齐方式与内核空间的对齐方式不同调用时 */
-	void (*compat_from_user)(void *dst, const void *src);
-	int (*compat_to_user)(void __user *dst, const void *src);
+    void (*compat_from_user)(void *dst, const void *src); // 32/64位用户空间数据转换
+    int (*compat_to_user)(void __user *dst, const void *src);
 #endif
-    /* 如果你是模块，请将其设置为 THIS_MODULE，否则设置为 NULL */
-	struct module *me;
 
-	const char *table;
-	unsigned int matchsize;
-	unsigned int usersize;
+    struct module *me;            // 指向模块的指针（THIS_MODULE）
+    const char *table;            // 所属表名（如"filter"）
+    unsigned int matchsize;       // 模块私有数据大小（如tcp_mtinfo结构）
+    unsigned int usersize;        // 用户空间数据大小（可能含对齐填充）
 #ifdef CONFIG_COMPAT
-	unsigned int compatsize;
+    unsigned int compatsize;      // 兼容模式下的数据大小
 #endif
-	unsigned int hooks;
-	unsigned short proto;
-
-	unsigned short family;
+    
+    unsigned int hooks;           // 生效的钩子位置（如NF_INET_LOCAL_IN）
+    unsigned short proto;         // 协议类型（IPPROTO_TCP等）
+    unsigned short family;        // 协议族（NFPROTO_IPV4/NFPROTO_IPV6）
 };
 ```
 
 ### ipt_entry_target
+通用目标，支持标准动作和自定义扩展动作。
+
 target分为标准target和扩展target，
 标准target就是 ACCEPT DROP REJECT等
 扩展target就是 DNAT SNAT等以模块形式存在的target.
@@ -829,83 +823,74 @@ target分为标准target和扩展target，
 对于xt_target的target回调函数的编写需要注意一点：
 该函数必须向netfilter框架返回IPT_CONTINUE, NF_ACCEPT, NF_DROP等值。
 ```c
-#define ipt_entry_target xt_entry_target
 struct xt_entry_target {
-	union {
-		struct {
-			__u16 target_size;
-
-			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
-			__u8 revision;
-		} user;
-		struct {
-			__u16 target_size;
-
-			/* Used inside the kernel */
-			struct xt_target *target;
-		} kernel;
-
-		/* Total length */
-		__u16 target_size;
-	} u;
-
-	unsigned char data[0];
+    union {
+        struct {
+            __u16 target_size;    // 目标结构总大小（包含头部+数据）
+            char name[XT_EXTENSION_MAXNAMELEN]; // 用户空间识别的目标名称(如"ACCEPT")
+            __u8 revision;        // 模块版本号（兼容性控制）
+        } user;
+        struct {
+            __u16 target_size;   // 确保内存对齐：内核根据此值计算目标结构的真实长度
+                                 // 支持动态扩展：如LOG目标需要存储日志前缀等额外信息时动态扩展空间
+            struct xt_target *target; // 内核空间指向目标模块的指针
+        } kernel;
+        __u16 target_size;        // 总长度（兼容性设计）
+    } u;
+    unsigned char data[0];        // 柔性数组，存储目标私有数据
 };
-
-/*目标的注册钩子。*/
-struct xt_target {
-	struct list_head list;
-
-	const char name[XT_EXTENSION_MAXNAMELEN];
-	u_int8_t revision;
-
-    /* 返回判决。自版本 2.6.9 以来，由于现在必须处理非线性 skbs，
-       即使用 skb_copy_bits 和 skb_ip_make_writable，
-       这个函数的参数顺序已经改变。 */
-	unsigned int (*target)(struct sk_buff *skb,
-			       const struct xt_action_param *);
-
-    /*
-     当用户尝试插入此类条目时被调用：
-     hook_mask 是可以调用的钩子掩码。
-     */
-    /* 应返回成功值（0）或其他错误代码（-Exxx）。*/
-	int (*checkentry)(const struct xt_tgchk_param *);
-
-    /* 当这种类型的条目被删除时调用。*/
-	void (*destroy)(const struct xt_tgdtor_param *);
-#ifdef CONFIG_COMPAT
-    /* 当用户空间对齐方式与内核空间的对齐方式不同调用时 */
-	void (*compat_from_user)(void *dst, const void *src);
-	int (*compat_to_user)(void __user *dst, const void *src);
-#endif
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
-    /* 如果你是模块，请设置此值为 THIS_MODULE，否则设置为 NULL */
-	struct module *me;
-
-	const char *table;
-	unsigned int targetsize;
-	unsigned int usersize;
-#ifdef CONFIG_COMPAT
-	unsigned int compatsize;
-#endif
-	unsigned int hooks;
-	unsigned short proto;
-
-	unsigned short family;
-};
-
 ```
 
-### 标准目标和扩展目标
+#### xt_target
+扩展动作目标的核心结构，用于描述规则匹配后的处理动作（如-j SNAT），支持标准动作（ACCEPT/DROP）和自定义扩展动作（如NAT、LOG等）。
+```c
+struct xt_target {
+    struct list_head list;         // 内核链表节点，用于模块注册管理
+    const char name[XT_EXTENSION_MAXNAMELEN]; // 目标模块名称（如"SNAT"）
+    u_int8_t revision;             // 模块版本号（兼容性控制）
+    
+    // 核心动作执行函数
+    // 数据包处理主函数，返回值决定后续流程：
+    //   XT_CONTINUE：继续匹配后续规则
+    //   NF_DROP：立即丢弃数据包
+    //   NF_ACCEPT：放行数据包
+    unsigned int (*target)(struct sk_buff *skb, const struct xt_action_param *); 
 
-xt_entry_target是基类target
-xt_standard_target是继承xt_entry_target，添加verdict属性
+    // 规则加载时的校验函数
+    int (*checkentry)(const struct xt_tgchk_param *); 
+
+    void (*destroy)(const struct xt_tgdtor_param *);   // 规则删除时的清理函数
+    
+#ifdef CONFIG_COMPAT
+    void (*compat_from_user)(void *dst, const void *src); // 32/64位用户空间数据转换
+    int (*compat_to_user)(void __user *dst, const void *src);
+#endif
+    
+    struct module *me;             // 指向模块的指针（THIS_MODULE）
+    const char *table;             // 所属表名（如"nat"）
+    unsigned int targetsize;       // 模块私有数据大小（如SNAT的IP地址结构）
+    unsigned int usersize;         // 用户空间数据大小（含对齐填充）
+#ifdef CONFIG_COMPAT
+    unsigned int compatsize;       // 兼容模式下的数据大小
+#endif
+    
+    unsigned int hooks;            // 生效的钩子位置（如NF_INET_POST_ROUTING）
+    unsigned short proto;          // 协议类型（IPPROTO_TCP等）
+    unsigned short family;         // 协议族（NFPROTO_IPV4/NFPROTO_IPV6）
+};
+```
+
+### xt_standard_target
+标准目标的核心数据结构，用于实现-j ACCEPT/DROP/RETURN 等基础动作
+
 ```c
 struct xt_standard_target {
-	struct xt_entry_target target;
-	int verdict; // 判决
+    // 继承自通用目标结构，标识模块信息
+    // 基础目标结构（含名称/模块指针）
+    struct xt_entry_target target;  
+    // 裁决结果（如NF_ACCEPT/DROP或跳转偏移）
+    // 裁决结果决定数据包命运
+    int verdict;                    
 };
 ```
 
@@ -941,8 +926,6 @@ struct xt_table_info {
 };
 ```
 
-
-
 ## 防火墙算法
 
 ### ipt_do_table
@@ -959,22 +942,27 @@ iptable_filter_hook(void *priv, struct sk_buff *skb,
 /*
  * skb : 被处理的数据
  * state : 包含输入输出设备，hook点等信息
- * table : filter/mangle/nat/raw 之一，包含hooks链
+ * table : filter/mangle/nat/raw 之一，包含表中所有hook规则链
  */
 unsigned int
 ipt_do_table(struct sk_buff *skb,
 	     const struct nf_hook_state *state,
 	     struct xt_table *table)
+    unsigned int verdict = NF_DROP; // 默认裁决：丢弃数据包
 	unsigned int hook = state->hook;
 	const struct xt_table_info *private;
 	const void *table_base;
 	struct ipt_entry *e, **jumpstack;
 
+    const char *indev = state->in ? state->in->name : nulldevname;  // 输入设备名
+    const char *outdev = state->out ? state->out->name : nulldevname; // 输出设备名
+
+    // 获得表的规则链集合
 	private = READ_ONCE(table->private); /* Address dependency. */
 	table_base = private->entries;
 	jumpstack  = (struct ipt_entry **)private->jumpstack[cpu];
 
-    // 根据hook点从表中取得第一条规则
+    // 根据hook点从对应规则链中取得第一条规则
 	e = get_entry(table_base, private->hook_entry[hook]);
         return (struct ipt_entry *)(base + offset);
 
@@ -982,6 +970,7 @@ ipt_do_table(struct sk_buff *skb,
 		const struct xt_entry_target *t;
 		const struct xt_entry_match *ematch;
 
+        // 1. IP层基础匹配（源/目标IP、分片标记等）
         // skb必须符合标准匹配
 		if (!ip_packet_match(ip, indev, outdev,
 		    &e->ip, acpar.fragoff)) {
@@ -991,6 +980,7 @@ ipt_do_table(struct sk_buff *skb,
 			continue;
 		}
 
+        // 2. 扩展匹配模块检查（TCP/UDP端口等）
         // 如果通过标准匹配再进行扩展匹配
 		xt_ematch_foreach(ematch, e) {
 			acpar.match     = ematch->u.kernel.match;
@@ -999,6 +989,7 @@ ipt_do_table(struct sk_buff *skb,
 				goto no_match;
 		}
 
+        // 3. 计数器更新（每个规则命中统计）
         // 匹配成功，增加当前规则的计数器
 		counter = xt_get_this_cpu_counter(&e->counters);
 		ADD_COUNTER(*counter, skb->len, 1);
@@ -1006,6 +997,7 @@ ipt_do_table(struct sk_buff *skb,
         // 获得规则的target
 		t = ipt_get_target_c(e);
 
+        // 4. 目标动作处理（分标准/扩展两种类型）
         // 如果没有定义扩展target，则使用标准target
 		if (!t->u.kernel.target->target) {
 			int v; // 表示判决
@@ -1065,9 +1057,10 @@ ipt_do_table(struct sk_buff *skb,
 
 	if (acpar.hotdrop)
 		return NF_DROP;
-	else return verdict;
+	else return verdict; // 最终裁决结果
 ```
 
+# 连接跟踪
 
 # nf hook
 ## 内核使用 nf hook 
