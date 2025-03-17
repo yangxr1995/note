@@ -233,3 +233,62 @@ GTCELLLOCK
   - 50512 BAND_NR_512
 
 
+# gtccinfo
+
+```bash
+AT+GTCCINFO? +GTCCINFO:
+
+LTE/eMTC/NB-IoT（a maximum of ten LTE cells are supported）
+LTE/eMTC/NB-IoT service cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<earfcn>,<physicalcellId>,<band>,<bandwidth>,<rssnr_value>,<rxlev>,<rsrp>,<rsrq>
+◦ LTE/eMTC/NB-IoT neighbor cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<earfcn>,<physicalcellId>,<bandwidth>,<rxlev>,<rsrp>,<rsrq>
+
+NR Cell（a maximum of ten NR cells are supported）
+NR service cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<narfcn>,<physicalcellId>,<band>,<bandwidth>,<ss-sinr>,<rxlev>,<ss-rsrp>,<ss-rsrq>
+NR neighbor cell:
+<IsServiceCell>,<rat>,<mcc>,<mnc>,<tac>,<cellid>,<narfcn>,<physicalcellId>,<ss-sinr>,<rxlev>,<ss-rsrp>,<ss-rsrq>
+```
+- 5g网络计算公式
+  - SINR = rxlev* 0.5 - 23.5
+  - RSRP = rsrp - 156
+  - RSRQ = rsrq * 0. 5 - 43.5
+- 非5g网络计算公式
+  - SINR = rxlev* 0.5
+  - RSRP = rsrp - 140
+  - RSRQ = rsrq * 0. 5 - 20
+
+## SINR
+SINR（信号与干扰加噪声比）的优劣标准因网络制式和应用场景而异，以下是综合不同技术规范及实测数据的参考范围：
+
+### 通用评价标准（适用于4G/5G）
+- 优秀（≥20 dB） : 可实现高速率稳定传输（如4K视频秒加载），是5G毫米波场景的理想状态。
+- 良好（13-20 dB）: 支持流畅网页浏览和视频通话，但峰值速率可能受限。
+- 一般（0-13 dB）: 基础通信功能正常，但会出现微信消息延迟、网页加载缓慢等现象。
+- 极差（<0 dB）: 频繁丢包导致扫码失败、通话断续，需紧急优化网络环境。
+
+## 信号质量
+### RSRP的典型分级标准
+- 极好（Excellent）
+  - 范围：RSRP > -85 dBm
+  - 表现：信号强度极佳，可支持高清视频通话、高速数据传输（如4K流媒体）等场景，用户体验流畅。
+- 好（Good）
+  - 范围：-85 dBm ≤ RSRP < -95 dBm
+  - 表现：信号质量良好，能满足日常通话和普通数据传输需求（如网页浏览、微信消息），但高速率业务可能出现轻微延迟。
+- 中等（Fair）
+  - 范围：-95 dBm ≤ RSRP < -105 dBm
+  - 表现：信号覆盖边缘区域，可能出现通话断续、网页加载缓慢等问题，需优化网络或调整位置。
+- 差（Poor）
+  - 范围：-105 dBm ≤ RSRP < -115 dBm
+  - 表现：信号极弱，可能导致频繁掉线、扫码支付失败等，需紧急优化或切换基站。
+- 极差（No Service）
+  - 范围：RSRP < -115 dBm
+  - 表现：基本无网络覆盖，无法正常通信。
+
+### RSRP与其他指标的关联
+RSRP需结合 SINR（信噪比） 和 RSRQ（信号质量） 综合评估网络性能：
+- 高RSRP但低SINR（如RSRP=-75 dBm，SINR=5 dB）：可能存在强干扰（如密集WiFi热点），需排查干扰源；
+- 低RSRP但高SINR（如RSRP=-100 dBm，SINR=15 dB）：信号弱但质量稳定，可通过调整基站天线优化覆盖。
+
+
