@@ -1061,6 +1061,551 @@ ipt_do_table(struct sk_buff *skb,
 ```
 
 # 连接跟踪
+## 知识概述
+```
+                                   ┌─────────────────────────────────────────┐ 
+                                   │                                         │ 
+                                   │                                         │ 
+                                   │          ┌──────┐                       │ 
+                                   │          │route │                       │ 
+   ┌───────────────────────────────┼─────┐    └──┬───┘                       │ 
+   │                               │     │       ▼                           │ 
+   │                  ┌─────┐      │     │    ┌───────┐                      │ 
+   │                  │INPUT│ ◄────┘     └───►│OUTPUT │                      │ 
+   │                  └─────┘                 └──┬────┘                      │ 
+   │                     ▲                       ▼                           │ 
+   │  ┌───────────┐   ┌──┴──┐    ┌───────┐    ┌──────────┐    ┌───────────┐  │ 
+   │  │ PREROUTING├─► │route├───►│FORWARD├───►│dst_output├──► │POSTROUTING│  │ 
+   │  └───────────┘   └─────┘    └───────┘    └──────────┘    └───────────┘  │ 
+   │         ▲                                                       ▲       │ 
+   │         │                                             ┌─────────┘       │ 
+   │         │                                             │                 │ 
+   └─── nf_conntrack_in                        nf_conntrack_confirm ─────────┘ 
+```
+conntrack有两个hook入口函数，
+- nf_conntrack_in: hook点PREROUTING和OUTPUT
+- nf_conntrack_confirm: hook点POSTROUTING和INPUT
+
+### 功能
+连接跟踪所做的事情就是发现并跟踪这些连接的状态，具体包括：
+ - 从数据包中提取元组（tuple）信息，辨别数据流（flow）和对应的连接（connection）
+ - 为所有连接维护一个状态数据库（conntrack table），例如连接的创建时间、发送 包数、发送字节数等等
+ - 回收过期的连接（GC）
+ - 为更上层的功能（例如 NAT）提供服务
+需要注意的是，连接跟踪中所说的“连接”，概念和 TCP/IP 协议中“面向连接”（ connection oriented）的“连接”并不完全相同，简单来说：
+TCP/IP 协议中，连接是一个四层（Layer 4）的概念。
+TCP 是有连接的，或称面向连接的（connection oriented），发送出去的包都要求对端应答（ACK），并且有重传机制
+UDP 是无连接的，发送的包无需对端应答，也没有重传机制
+CT 中，一个元组（tuple）定义的一条数据流（flow ）就表示一条连接（connection）。
+
+当加载内核模块 nf_conntrack 后，conntrack 机制就开始工作。网络数据包通过 Netfilter 时的工作流向，conntrack（椭圆形方框）在内核中有两处位置（PREROUTING 和 OUTPUT 之前）能够跟踪数据包。
+每个通过 conntrack 的数据包，内核都为其生成一个 conntrack 条目用以跟踪此连接，对于后续通过的数据包，内核会判断若此数据包属于一个已有的连接，则更新所对应的 conntrack 条目的状态(譬如更新为 ESTABLISHED 状态)，否则内核会为它新建一个 conntrack 条目。
+所有的 conntrack 条目都存放在一张表里，称为连接跟踪表（conntrack table）。连接跟踪表存放于系统内存中，可用 cat /proc/net/nf_conntrack 命令查看当前跟踪的所有 conntrack 条目，conntrack 维护的所有信息都包含在条目中，通过它就可以知道某个连接处于什么状态。
+
+### 状态
+连接跟踪（Conntrack）是 Linux 内核中用于追踪网络连接状态的机制，其核心是通过维护一个连接跟踪表（Conntrack Table）记录网络流的元组信息及状态。以下是各状态的详细说明：
+
+- NEW（新建）
+  - 定义：表示连接的第一个数据包，此前无相关记录。此时系统会尝试创建新条目，但需通过安全校验后才确认。
+  - 流程：
+    - 1.数据包触发连接跟踪模块，若未匹配现有条目，则生成临时 NEW 状态条目。
+    - 2.需通过 INPUT 或 POSTROUTING 链的 iptables 规则校验后，条目才被“确认”并加入主表。
+  - 示例：TCP 的 SYN 包首次到达时标记为 NEW。
+- ESTABLISHED（已建立）
+  - 定义：当数据包匹配到现有连接条目且通过传输层（如 TCP/UDP）的状态验证时，该连接状态会被标记为 ESTABLISHED。
+  - 特点：
+    - 表示双向通信已建立，后续数据包无需重新创建连接条目。
+    - 例如，TCP 连接完成三次握手后进入此状态，UDP 则在首个双向数据包交换后标记为 ESTABLISHED。
+  - 应用场景：防火墙规则中允许已建立连接的流量通过，提升过滤效率。
+- RELATED（关联）
+  - 定义：数据包与现有连接存在逻辑关联，但属于独立的新连接。
+  - 触发条件：
+    - ICMP 错误：如目标不可达（ICMP Destination Unreachable）包含原始连接信息。
+    - 辅助协议：如 FTP 的数据通道（端口协商通过控制连接完成）。
+    - 期望表（Expect Table）：由连接跟踪助手（如 nf_conntrack_ftp）预先创建关联条目。
+  - 作用：允许相关流量自动放行，避免手动开放额外端口。
+- 4. UNTRACKED（未跟踪）
+  - 定义：数据包被显式排除在连接跟踪之外，通常用于特定协议或优化场景。
+  - 常见场景：
+    - IPv6 邻居发现协议（NDP）：如邻居请求（Neighbor Solicitation）和通告（Neighbor Advertisement）。
+    - 自定义规则：通过 iptables 的 NOTRACK 目标标记无需跟踪的流量。
+  - 优势：减少内核资源消耗，适用于高频但无需状态管理的流量。
+- 5. INVALID（无效）
+  - 定义：数据包无法被归类为有效连接，可能因协议异常或校验失败导致。
+  - 常见原因：
+    - 传输层校验失败：如 TCP 序列号异常或 UDP 校验和错误。
+    - 协议不匹配：例如 ICMP 报文未关联任何现有连接。
+    - 内核模块限制：如未加载特定协议的支持模块（如 SCTP）。
+  - 处理建议：防火墙规则通常默认丢弃 INVALID 状态流量以增强安全性。
+
+### helper模块
+#### 解决的问题
+某些协议（如 FTP、SIP、H.323）的控制通道和数据通道分离，导致传统连接跟踪难以识别关联性。例如：
+
+FTP 通过 TCP 端口 21（控制通道）协商动态端口（数据通道）。
+SIP 通过信令消息协商媒体流端口。
+Conntrack Helper 通过监控控制通道的流量（如 FTP 的 PORT 命令或 SIP 的 SDP 报文），解析协议内容以预测后续数据连接的参数（IP 和端口），并动态创建“期望”（Expectations），将这些新连接标记为 RELATED 状态。
+
+#### 工作原理:动态添加“期望”（Expectations）
+功能机制：当检测到控制通道的特定报文（如 FTP 的 PORT 命令），Helper 会生成一个预期条目，告知内核即将到来的数据连接属于当前控制连接的衍生流量。例如，若 FTP 客户端通过控制连接声明将使用端口 3000 传输数据，Helper 会预先允许该端口的连接。
+NAT 支持：在生成期望时，Helper 会结合 NAT 规则调整预期连接的地址和端口，确保数据通道的 NAT 转换与控制通道一致。
+#### 优缺点
+- 优势与设计目标
+  - 减少端口开放需求：传统方案需为动态端口开放大范围端口，而 Helper 通过动态跟踪仅允许必要的端口，提升安全性。
+  - 避免 1:1 NAT 配置：例如 FTP 主动模式下，无需为每个客户端配置固定 NAT 映射，Helper 自动处理动态端口转换。
+- 局限性
+  - 尽力而为（Best Effort）：Helper 不进行 TCP 流重组或深度解析，可能因报文分片或乱序导致跟踪失败。
+
+### 主连接跟踪表
+主连接跟踪表（Main Conntrack Table）是 Linux 内核中用于记录网络连接状态的核心数据结构，其实现机制和特性可总结如下：
+
+1. 哈希表结构与并发控制
+哈希表实现：采用哈希表存储连接条目，通过元组（tuple）作为键值，包含源/目的 IP、端口、协议等信息。每个条目会被哈希两次：一次基于原始方向（客户端到服务端），另一次基于回复方向（服务端到客户端），以支持 NAT 场景下双向流量的快速匹配。
+并发机制：通过 RCU（Read-Copy-Update）实现无锁读取，保证高并发下的高效查询；哈希锁定则允许多个线程在不同哈希桶（bucket）上并行执行添加/删除操作，避免全局锁竞争。
+2. 表容量与限制
+固定大小与上限：哈希表的桶数量由 nf_conntrack_buckets 参数指定，总条目上限由 nf_conntrack_max 控制，两者均为固定值且无自动扩容机制。初始大小根据系统内存自动计算（例如默认桶数为总内存的 1/16384）。
+内存管理：每个条目对应 nf_conn 结构体，包含连接状态、超时时间、NAT 信息等。当条目达到上限时，新连接可能因无法分配条目而被丢弃。
+3. 设计特点与 NAT 支持
+双向哈希优化：为处理 NAT 的地址/端口转换，每个连接在表中存储两个哈希条目（原始流和回复流），确保双向流量均能快速匹配到同一连接记录。
+性能权衡：固定大小的设计简化了内存管理，但可能因突发流量导致表满，需依赖垃圾回收（GC）机制清理超时条目。
+4. 参数配置与监控
+用户可通过 /proc/sys/net/netfilter/ 下的参数动态调整表大小和超时策略。
+监控工具（如 conntrack -L 或 Prometheus 的 node_nf_conntrack_entries 指标）可实时查看表使用情况，预防因表满引发的连接故障。
+
+### conntrack和NAT
+NAT（网络地址转换）的实现依赖于连接跟踪（Connection Tracking，简称conntrack）机制，其核心原理和实现细节可总结如下：
+
+#### 一、NAT与连接跟踪的关系
+1.构建于连接跟踪之上
+NAT功能的实现需要连接跟踪提供会话状态信息。连接跟踪模块会为每个网络连接（包括TCP/UDP/ICMP等协议）创建并维护一个状态记录（conntrack entry），包含源/目的IP、端口、协议类型及状态（如TCP握手阶段）。NAT模块则基于这些信息动态生成地址转换规则，例如将内网IP:Port映射为公网IP:Port。
+
+2.NAT映射的创建时机
+NAT映射在连接跟踪条目创建时设置。当流的第一个数据包经过系统时，连接跟踪模块会初始化conntrack entry，同时NAT模块根据配置的规则（如iptables的nat表）生成对应的地址映射。后续数据包直接复用该映射，无需重复处理。
+示例：内网主机（192.168.1.100:5000）首次访问公网服务器时，NAT会记录其映射为公网IP（203.0.113.10:6000），后续同一连接的数据包直接使用该映射。
+
+#### 二、关键实现机制
+1.iptables的nat表仅处理首包
+由于NAT映射在连接跟踪初始化时生成，iptables的nat表规则仅在流的第一个数据包触发。后续数据包直接通过连接跟踪表中已建立的映射进行转换，不再经过nat表规则匹配。这种设计大幅提升了处理效率。
+
+2.nat bysource哈希表
+这是一个辅助数据结构，用于确保NAT映射的唯一性。当新增映射时，系统会检查此表，避免同一公网IP:Port被重复分配给不同内网连接。例如：
+
+若两个内网主机（192.168.1.2:3000和192.168.1.3:3000）尝试通过同一公网IP（203.0.113.10）映射到相同端口（5000），nat bysource table会强制为第二个连接分配不同的端口（如5001）。
+
+3.NAT钩子的全局影响
+一旦NAT功能启用（如通过iptables加载nat规则），所有经过系统的连接都会触发NAT钩子（hook），即使某些连接无需地址转换。钩子会为每个连接生成NAT映射记录，但仅对匹配规则的数据包实际修改地址。
+
+### 溢出处理
+关于 nf_conntrack 的溢出处理机制，结合 Linux 内核连接跟踪模块的设计逻辑，其核心是通过动态替换非关键连接条目来缓解表满问题。以下是具体分析：
+
+溢出处理机制解析
+1. 状态分类与“确保”条目
+“确保”条目（Assured）：由第4层协议（如 TCP）在特定阶段标记为稳定状态的连接。例如，TCP 连接完成三次握手后，协议跟踪器会将其标记为“确保”状态。这类条目通常对应已建立的、需长期维护的有效连接（如已建立的 HTTP 会话）。
+非“确保”条目：处于初始化或中间状态的连接（如 SYN 未完成、UDP 临时会话），未通过协议层完整性验证，优先级较低。
+2. 表满时的处理流程
+触发条件：当活跃连接数 nf_conntrack_count 达到 nf_conntrack_max 上限时，新连接因无空间记录而被丢弃。
+替换策略：
+内核会在哈希表中最多搜索 8 个桶（Bucket），寻找非“确保”条目。
+若找到，则销毁该条目并分配新条目给当前连接；若未找到，直接丢弃新数据包。
+设计假设：大多数连接是非“确保”的，且短生命周期连接（如 DNS 查询）占比较高，优先替换此类条目可减少对核心业务的影响。
+
+技术背景与优化关联
+1. 
+参数调优与监控
+
+增大表容量：通过 sysctl 调整 nf_conntrack_max，公式为 内存容量 (Bytes) / 16384 / (架构位数/32)（例如 64GB 内存的 64 位系统约为 2097152）。
+缩短超时时间：减少 nf_conntrack_tcp_timeout_* 参数值（如将 established 从默认 5 天改为 1 小时），加速条目回收。
+监控告警：通过工具（如 categraf）监控 nf_conntrack_count 使用率，阈值超过 80% 时触发告警。
+
+生产环境应对建议
+1.规避策略
+禁用非必要跟踪：在 iptables 的 raw 表中添加 NOTRACK 规则，跳过特定流量（如 Web 服务器 80/443 端口）的连接跟踪。
+卸载模块：若无 NAT 或状态检测需求，直接卸载 nf_conntrack 模块。
+2.架构优化
+连接池管理：应用程序使用长连接替代频繁的短连接，减少跟踪条目创建频率。
+负载均衡：在高并发场景下，通过分布式网关分散连接跟踪压力
+
+
+### conntrack命令
+conntrack命令支持多种参数，用于执行不同的操作：
+ - -L, --list：列出连接跟踪表中的所有条目。
+ - -G, --get：获取单个连接跟踪条目的信息。
+ - -D, --delete：从连接跟踪表中删除条目。
+ - -I, --create：创建一个新的连接跟踪条目。
+ - -U, --update：更新已存在的连接跟踪条目。
+ - -E, --event：监听连接跟踪事件。
+
+conntrack -L 输出结果解析：
+- 协议：表示连接使用的协议，如tcp、udp等。
+- 协议号：表示连接使用的协议号，如6代表tcp连接、17代表udp连接等。
+- TCP状态计数器，可以理解为超时时间（Timeout）：表示连接条目在连接跟踪表中保持的剩余时间（秒）。当这个时间到达0时，条目将被自动从跟踪表中移除。
+  - 对于TCP连接，该数字表示连接跟踪条目在内核连接跟踪表中的剩余时间。这个计时器的值会根据连接的状态（如ESTABLISHED、TIME_WAIT等）和配置的超时设置变化。计时器的值为零时，连接跟踪条目会从表中删除。
+  - 对于非TCP连接（如UDP），因为UDP是无连接的，所以这个计数器代表连接跟踪条目在没有任何新的数据包更新的情况下，还可以在连接跟踪表中存活多长时间。
+- 连接状态：描述TCP连接的当前状态。
+  - ESTABLISHED：已建立连接
+  - TIME_WAIT：等待足够的时间以确保远程TCP接收到连接终止请求的确认）
+  - CLOSE_WAIT：CLOSE_WAIT状态表示对端（远程主机）已经关闭了连接的一半（发送了一个FIN包），并且本地端（你的计算机）已经接收到这个关闭请求，但是本地应用程序还没有关闭（或者说还没有调用close来关闭连接）。简单来说，CLOSE_WAIT状态意味着TCP连接在等待本地应用程序去关闭连接。
+  - SYN_SENT：客户端已发送一个连接请求（SYN包）给服务器，并等待服务器的确认。这表示客户端已经开始了TCP三次握手过程
+  - SYN_RECE：服务器收到客户端的SYN包，并回应一个SYN+ACK包，等待客户端的确认。这个状态表示服务器端已经响应了连接请求，正在进行三次握手的第二步。
+  - FIN_WAIT_1：一方（通常是客户端）决定关闭连接，并发送一个FIN包给对方，等待对方的确认。这标志着连接关闭过程的开始
+  - FIN_WAIT_2：在发送FIN包并收到ACK包后，连接进入FIN_WAIT_2状态。在这个状态下，连接的关闭一方等待对方的FIN包。
+  - CLOSE_WAIT：当一方收到另一方的FIN包，即对方请求关闭连接时，它会发送一个ACK包作为回应，并进入CLOSE_WAIT状态。在这个状态下，等待本地应用程序关闭连接。
+  - CLOSING：在同时关闭的情况下，当双方几乎同时发送FIN包时，连接会进入CLOSING状态，表示双方都在等待对方的FIN包的确认。
+  - LAST_ACK：当处于CLOSE_WAIT状态的一方发送FIN包，并等待对方的最终ACK包时，连接进入LAST_ACK状态。
+  - TIME_WAIT：在收到对方的FIN包并发送ACK包后，连接进入TIME_WAIT状态。这个状态持续一段时间（2倍的MSL，最大报文生存时间），以确保对方收到了最终的ACK包。这也允许老的重复数据包在网络中消失。
+  - CLOSED：连接完全关闭，两端都释放了连接的资源。
+- 源地址（src）、目的地址（dst）：发送数据包的主机的IP地址。src=源IP dst=目的IP：表示数据包的源和目的IP地址。
+- 源端口（sport）、目的端口（dport）：发送数据包的主机的端口号。sport=源端口 dport=目的端口：表示数据包的源和目的端口号。
+- UNREPLIED / ASSURED：
+  - UNREPLIED：表示从源到目标的连接请求尚未收到回复。
+  - ASSURED：表示连接已经被确认，不会因为短时间内没有数据包而被清除。
+- Mark（标记）：mark字段用于表示特定的连接跟踪条目被打上的标记（或称为标签）
+  - 这个标记是一个整数值，通常由防火墙规则（如iptables）设置，用于对特定的数据包或连接进行分类或执行特定的处理逻辑。
+  - 可能的取值：mark的取值范围是从0到4294967295（即2^32-1），其中0通常表示未被标记的连接。非零的值则根据实际的防火墙规则和策略而定，不同的值可以代表不同的分类或处理逻辑。例如，在某些配置中，mark可以用来区分经过VPN的流量、被特定规
+- Use（使用）：use字段表示当前有多少个内核组件正在引用这个连接跟踪条目。简而言之，它表明这个连接跟踪条目的“使用度”或“引用计数”。
+可能的取值：use的取值是一个正整数，起始值至少为1，表示至少有一个引用（即连接跟踪本身）。如果有多个内核组件因为某些原因（如特定的路由或防火墙规则）同时需要跟踪这个连接，use的值会相应增加。一般而言，大多数情况下use的值会比较低，除非系统配置导致多个组件需要引用同一个连接跟踪条目。
+
+
+| 命令   | 说明    |
+|--------------- | --------------- |
+| conntrack -L -p tcp   | 查看所有 TCP 连接   |
+| conntrack -L -p udp   | 	查看所有 UDP 连接   |
+| conntrack -L -p tcp --state ESTABLISHED   | 显示具有特定状态的连接条目   |
+| conntrack -L -s 192.168.201.111   | 显示来自或发送到特定IP的连接条目   |
+| conntrack -E  | 监听连接跟踪事件: 实时显示连接跟踪事件，如新建（NEW）、更新（UPDATE）和销毁（DESTROY）事件。   |
+| conntrack -D --src 192.168.1.2   | 删除指定源地址的连接   |
+| conntrack -D --state TIME_WAIT  | 删除所有处于特定状态的连接   |
+
+## 实现分析
+skb -> ip_conntrack_tuple
+ip_conntrack_tuple 是 conntrack认识的数据包
+skb 如何转换为 ip_conntrack_tuple， 和具体协议有关，
+TCP/UDP : 源目的IP，源目的端口+ 序列号
+ICMP : 源目的IP + 类型 + 代号 + 序列号 
+
+谨记：入口时创建连接跟踪记录，出口时将该记录加入到连接跟踪表中。我们分别来看看。
+
+
+   ┌─────┐    ┌─────────────────────────────┐     ┌───────────────────────────────┐        ┌───────────────────────────┐      ┌──────────────────┐
+   │ skb ├───►│ 转换成conntrack的数据包类型 ├────►│创建/查找获得相关连接跟踪记录项├───────►│ 调用该报文所属协议的      ├─────►│ 改变连接记录状态 │
+   └─────┘    │     ip_conntrack_tuple      │     └───────────────────────────────┘        │ 连接跟踪模块提供的packet()│      └──────────────────┘
+              └─────────────────────────────┘                                              └───────────────────────────┘
+
+
+整个入口的流程简述如下：对于每个到来的skb，连接跟踪都将其转换成一个tuple结构，然后用该tuple去查连接跟踪表。如果该类型的数据包没有被跟踪过，将为其在连接跟踪的hash表里建立一个连接记录项，对于已经跟踪过了的数据包则不用此操作。紧接着，调用该报文所属协议的连接跟踪模块的所提供的packet()回调函数，最后根据状态改变连接跟踪记录的状态。
+
+    ┌───┐   ┌──────────────────────┐     ┌──────────────────────────────┐
+    │skb├──►│调用协议的helper(可选)├────►│丢弃数据包或将其加入连接跟踪表│
+    └───┘   └──────────────────────┘     └──────────────────────────────┘
+
+整个出口的流程简述如下：对于每个即将离开Netfilter框架的数据包，如果用于处理该协议类型报文的连接跟踪模块提供了helper函数，那么该数据包首先会被helper函数处理，然后才去判断，如果该报文已经被跟踪过了，那么其所属连接的状态，决定该包是该被丢弃、或是返回协议栈继续传输，又或者将其加入到连接跟踪表中。
+
+
+需要开发对于协议的连接跟踪模块，就需要构造协议对应的ip_conntrack_protocol
+调用ip_conntrack_protocol_register将对象注册
+ 
+### nf_conntrack_in
+```c
+// 处理进入连接跟踪的流量，创建或更新连接跟踪条目。
+// skb : 数据包
+// state : nf钩子状态，如协议栈，hook点等
+unsigned int
+nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
+	enum ip_conntrack_info ctinfo;
+	struct nf_conn *ct, *tmpl;
+	u_int8_t protonum;
+	int dataoff, ret;
+
+	tmpl = nf_ct_get(skb, &ctinfo); // 获取skb的连接信息
+	if (tmpl || ctinfo == IP_CT_UNTRACKED) { // 若skb已经存在连接信息，或不需要跟踪则直接返回
+		if ((tmpl && !nf_ct_is_template(tmpl)) ||
+		     ctinfo == IP_CT_UNTRACKED)
+			return NF_ACCEPT;
+		skb->_nfct = 0;
+    }
+
+    // skb没有nf_conn，接下来要给skb创建nf_conn，
+    // 需要从skb获得5元组，所以先获得L4的偏移
+	dataoff = get_l4proto(skb, skb_network_offset(skb), state->pf, &protonum);
+
+repeat:
+    // 根据skb构造元组，并创建/查找nf_conn
+	ret = resolve_normal_ct(tmpl, skb, dataoff,
+				protonum, state);
+
+    // 获得skb的nf_conn
+	ct = nf_ct_get(skb, &ctinfo);
+
+    // 根据具体协议判断数据包的合法性，并更新连接状态(包括ct 和 ctinfo)
+	ret = nf_conntrack_handle_packet(ct, skb, dataoff, ctinfo, state);
+
+    // IPS_SEEN_REPLY_BIT: 标记某个网络连接是否已收到双向通信的响应包
+    // 如果是第一次建立双向通信，发送 IPCT_REPLY 事件
+	if (ctinfo == IP_CT_ESTABLISHED_REPLY &&
+	    !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+		nf_conntrack_event_cache(IPCT_REPLY, ct);
+
+	if (tmpl)
+		nf_ct_put(tmpl);
+
+	return ret;
+```
+
+### resolve_normal_ct
+```c
+static int
+resolve_normal_ct(struct nf_conn *tmpl,
+		  struct sk_buff *skb,
+		  unsigned int dataoff,
+		  u_int8_t protonum,
+		  const struct nf_hook_state *state)
+	const struct nf_conntrack_zone *zone;
+	struct nf_conntrack_tuple tuple;
+	struct nf_conntrack_tuple_hash *h;
+	enum ip_conntrack_info ctinfo;
+	struct nf_conntrack_zone tmp;
+	struct nf_conn *ct;
+	u32 hash;
+
+    /*根据协议类型（如TCP/UDP/ICMP）从数据包中提取五元组*/
+	nf_ct_get_tuple(skb, skb_network_offset(skb),
+			     dataoff, state->pf, protonum, state->net,
+			     &tuple);
+
+	zone = nf_ct_zone_tmpl(tmpl, skb, &tmp);
+    /*计算tuple的哈希值*/
+	hash = hash_conntrack_raw(&tuple, state->net);
+    /*全局连接跟踪表中查找匹配项*/
+	h = __nf_conntrack_find_get(state->net, zone, &tuple, hash);
+
+        /*创建新的nf_conn结构，并初始化其状态（如方向、超时时间等）*/
+        /*新连接会暂时加入“未确认列表”（unconfirmed_list）*/
+        /*直到后续确认阶段才会加入全局表*/
+	if (!h)
+		h = init_conntrack(state->net, tmpl, &tuple,
+				   skb, dataoff, hash);
+
+    /*获得nf_conn*/
+	ct = nf_ct_tuplehash_to_ctrack(h);
+
+    /*确定连接状态*/
+        /*如果skb方向是响应*/
+	if (NF_CT_DIRECTION(h) == IP_CT_DIR_REPLY) {
+		ctinfo = IP_CT_ESTABLISHED_REPLY;
+	} else {
+        /*如果skb方向是请求*/
+            /*如果nf_conn已经有双向通信*/
+		if (test_bit(IPS_SEEN_REPLY_BIT, &ct->status)) {
+			ctinfo = IP_CT_ESTABLISHED;
+            /*如果是期待*/
+		} else if (test_bit(IPS_EXPECTED_BIT, &ct->status)) {
+			ctinfo = IP_CT_RELATED;
+		} else {
+			ctinfo = IP_CT_NEW;
+		}
+	}
+
+    /*将nf_conn指针和ctinfo状态附加到skb->_nfct字段，*/
+    /*供后续Netfilter钩子（如NAT、防火墙规则）使用。*/
+	nf_ct_set(skb, ct, ctinfo);
+```
+
+
+
+## 核心数据结构
+### ip_conntrack_info
+```c
+enum ip_conntrack_info {
+    /*核心状态定义*/
+	IP_CT_ESTABLISHED,
+	IP_CT_RELATED,
+	IP_CT_NEW,
+    /*方向标志*/
+        /*响应方向*/
+	IP_CT_IS_REPLY,
+
+        /*响应方向的 ESTABLISHED 状态（如 TCP ACK 包）*/
+	IP_CT_ESTABLISHED_REPLY = IP_CT_ESTABLISHED + IP_CT_IS_REPLY,
+        /*响应方向的 RELATED 状态（如 FTP 数据通道的响应包）*/
+	IP_CT_RELATED_REPLY = IP_CT_RELATED + IP_CT_IS_REPLY,
+
+    /*特殊状态和兼容性*/
+        /*统计内核中连接状态类型的总数（不包含 IP_CT_UNTRACKED）*/
+	IP_CT_NUMBER,
+
+#ifndef __KERNEL__
+        /*统计内核中连接状态类型的总数（不包含 IP_CT_UNTRACKED）。用户态兼容性代码中，IP_CT_NEW_REPLY 被设为 IP_CT_NUMBER，但内核实际未使用此状态*/
+	IP_CT_NEW_REPLY = IP_CT_NUMBER,
+#else
+        /*仅在内核中定义（__KERNEL__ 宏生效时），表示数据包未被连接跟踪*/
+	IP_CT_UNTRACKED = 7,
+#endif
+};
+```
+
+### nf_conn
+```c
+struct nf_conntrack {
+	atomic_t use;
+};
+
+struct nf_conn {
+    /*引用计数器，用于管理nf_conn的生命周期*/
+    /*nf_conntrack_get() 增加引用*/
+    /*nf_connpu_put() 减少引用*/
+    /*当引用为0时，释放nf_conn*/
+	struct nf_conntrack ct_general;
+
+	spinlock_t	lock;
+
+    /*连接超时时间（单位为 jiffies）。*/
+    /*若连接长时间无活动，超时后将被垃圾回收（GC）机制清理*/
+	u32 timeout;
+
+#ifdef CONFIG_NF_CONNTRACK_ZONES
+	struct nf_conntrack_zone zone;
+#endif
+    /*存储双向元组的哈希值，分别对应原始方向(original)和应答方向(reply)*/
+    /*每个元组包含源/目的IP，端口，协议号等信息，用于唯一标记一条连接*/
+	struct nf_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
+
+    /*连接状态:*/
+    /*IPS_EXPECTED：表示该连接是某个期望连接（如 FTP 数据通道）的子连接。*/
+    /*IPS_CONFIRMED：表示连接已确认并加入哈希表。*/
+    /*IPS_DYING：表示连接正在被销毁*/
+	unsigned long status;
+
+	u16		cpu;
+
+    /*网络命名空间标识，支持容器化环境中不同命名空间的连接隔离*/
+	possible_net_t ct_net;
+
+#if IS_ENABLED(CONFIG_NF_NAT)
+    /*当连接经过 NAT（如 SNAT/DNAT）处理后，此节点将连接插入 NAT 哈希链表中，便于快速查找转换后的连接。*/
+	struct hlist_node	nat_bysource;
+#endif
+	/* all members below initialized via memset */
+	struct { } __nfct_init_offset;
+
+    /*若当前连接是另一个连接的子连接（如 FTP 数据连接），此指针指向主连接（如 FTP 控制连接）*/
+	struct nf_conn *master;
+
+#if defined(CONFIG_NF_CONNTRACK_MARK)
+    /*用于存储安全标记（如 iptables 的 MARK 或 SELinux 的 SECMARK），支持基于标记的过滤策略*/
+	u_int32_t mark;
+#endif
+
+#ifdef CONFIG_NF_CONNTRACK_SECMARK
+    /*用于存储安全标记（如 iptables 的 MARK 或 SELinux 的 SECMARK），支持基于标记的过滤策略*/
+	u_int32_t secmark;
+#endif
+
+    /*扩展结构，支持动态添加功能模块（如 NAT、Helper、ACCT 等）。*/
+    /*例如，NAT 扩展会修改元组信息以实现地址转换。*/
+	struct nf_ct_ext *ext;
+
+    /*存储协议私有数据。例如，TCP 协议记录序列号、UDP 记录超时策略、ICMP 记录类型/代码等*/
+	union nf_conntrack_proto proto;
+};
+```
+
+### nf_conntrack_tuple
+该结构体的核心功能是唯一标识一个网络连接，通过以下设计实现：
+- 协议无关性：支持 TCP、UDP、ICMP 等多种协议。
+- 方向区分：通过 dir 字段标记数据包方向（如请求与响应）。
+- NAT 兼容性：区分「可操作部分」（src）与「固定部分」（dst），便于 NAT 修改源/目的信息时保持连接标识一致
+```c
+/*表示连接的可操作部分（Manipulable），通常用于 NAT 转换。*/
+struct nf_conntrack_man {
+    /*源IP*/
+	union nf_inet_addr u3;
+    /*源端口等*/
+	union nf_conntrack_man_proto u;
+	/* Layer 3 protocol */
+	u_int16_t l3num;
+};
+
+/*用于唯一标识一个网络连接*/
+struct nf_conntrack_tuple {
+    /*表示连接的可操作部分（Manipulable），通常用于 NAT 转换。*/
+	struct nf_conntrack_man src;
+
+    /*表示连接的固定部分，用于唯一标识连接。*/
+	struct {
+        /*目标地址，IPv4/IPv6 兼容的联合体。*/
+		union nf_inet_addr u3;
+
+        /*TCP/UDP：使用端口标识连接*/
+        /*ICMP：通过 type/code 区分报文类型（如 Echo Request 与 Reply）*/
+        /*GRE：使用密钥标识隧道，适用于 VPN 等场景*/
+		union {
+			/* Add other protocols here. */
+			__be16 all;
+
+			struct {
+				__be16 port;
+			} tcp;
+			struct {
+				__be16 port;
+			} udp;
+			struct {
+				u_int8_t type, code;
+			} icmp;
+			struct {
+				__be16 port;
+			} dccp;
+			struct {
+				__be16 port;
+			} sctp;
+			struct {
+				__be16 key;
+			} gre;
+		} u;
+
+        /*协议号（如 TCP=6，UDP=17），决定 u 字段的解析方式*/
+		u_int8_t protonum;
+
+        /*方向*/
+		u_int8_t dir;
+	} dst;
+};
+```
+
+### nf_conntrack_tuple_hash
+每个连接在哈希表中会有两个条目，分别对应原始方向（ORIGINAL）和回复方向（REPLY）的元组。例如，客户端到服务器的请求（ORIGINAL）和服务器到客户端的响应（REPLY）会分别生成两个 tuple，但这两个条目通过 ip_conntrack 结构体关联，共同描述一个完整的连接.
+在 NAT 场景中，元组会被修改（如替换 IP 或端口），此时需更新对应的 tuple 条目。例如，SNAT 会修改原始方向的源地址，DNAT 会修改目的地址，而连接跟踪需确保两个方向的元组均正确映射。
+```c
+struct hlist_nulls_node {
+	struct hlist_nulls_node *next, **pprev;
+};
+
+struct nf_conntrack_tuple_hash {
+	struct hlist_nulls_node hnnode;
+	struct nf_conntrack_tuple tuple;
+};
+```
+### nf_conntrack_zone
+用于区分不同的连接跟踪区域（Zone），以实现更细粒度的连接管理
+```c
+struct nf_conntrack_zone {
+    /*作用：唯一标识一个连接跟踪区域。不同 Zone 的 id 值不同，内核通过此字段区分不同 Zone 的流量。*/
+    /*应用场景：例如在容器化环境中，不同网络命名空间（Network Namespace）可能分配不同的 Zone ID，确保连接跟踪表隔离    */
+	u16	id;
+
+    /*作用：标志位字段，用于配置 Zone 的属性和行为。常见的标志可能包括：*/
+        /*NF_CT_ZONE_DIR_ORIG：标记原始方向的流量（如客户端发起的请求）。*/
+        /*NF_CT_ZONE_DIR_REPLY：标记回复方向的流量（如服务端返回的响应）。*/
+    /*其他扩展标志，如是否启用特定协议的支持或安全策略。*/
+    /*功能扩展：通过标志位，Zone 可以灵活支持 NAT、安全标记（如 CONFIG_NF_CONNTRACK_SECMARK）等特性。*/
+	u8	flags;
+
+    /*作用：指示流量方向，通常与 Netfilter 钩子（Hook）的位置相关。例如：*/
+        /*IP_CT_DIR_ORIGINAL：原始方向（如客户端到服务端）。*/
+        /*IP_CT_DIR_REPLY：回复方向（如服务端到客户端）。*/
+    /*实现机制：在连接跟踪过程中，内核根据 dir 区分数据包属于连接的发起端还是响应端，从而正确更新连接状态*/
+	u8	dir;
+};
+```
 
 # nf hook
 ## 内核使用 nf hook 
