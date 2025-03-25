@@ -1332,12 +1332,31 @@ repeat:
     // 根据skb构造元组，并创建/查找nf_conn
 	ret = resolve_normal_ct(tmpl, skb, dataoff,
 				protonum, state);
+	if (ret < 0) { // 系统太忙，丢弃数据包
+		NF_CT_STAT_INC_ATOMIC(state->net, drop);
+		ret = NF_DROP;
+		goto out;
+	}
 
     // 获得skb的nf_conn
 	ct = nf_ct_get(skb, &ctinfo);
 
-    // 根据具体协议判断数据包的合法性，并更新连接状态(包括ct 和 ctinfo)
+    // 根据具体L4协议判断数据包的合法性，更新连接状态(如超时时长，数据包数量等)
 	ret = nf_conntrack_handle_packet(ct, skb, dataoff, ctinfo, state);
+    if (ret <= 0) { // 数据包非法, 丢弃数据包
+		nf_conntrack_put(&ct->ct_general);
+		skb->_nfct = 0;
+        // 特殊情形：TCP跟踪报告尝试重新打开一个关闭或失败的连接。我们必须回滚并创建一个新的conntrack。
+		if (ret == -NF_REPEAT)
+			goto repeat;
+
+		NF_CT_STAT_INC_ATOMIC(state->net, invalid);
+		if (ret == -NF_DROP)
+			NF_CT_STAT_INC_ATOMIC(state->net, drop);
+
+		ret = -ret;
+		goto out;
+	}
 
     // IPS_SEEN_REPLY_BIT: 标记某个网络连接是否已收到双向通信的响应包
     // 如果是第一次建立双向通信，发送 IPCT_REPLY 事件
@@ -1351,8 +1370,9 @@ repeat:
 	return ret;
 ```
 
-### resolve_normal_ct
+#### resolve_normal_ct
 ```c
+// 根据skb构造元组，并创建/查找nf_conn, 并将nf_conn加入未确认连接表
 static int
 resolve_normal_ct(struct nf_conn *tmpl,
 		  struct sk_buff *skb,
@@ -1410,6 +1430,613 @@ resolve_normal_ct(struct nf_conn *tmpl,
 	nf_ct_set(skb, ct, ctinfo);
 ```
 
+#### nf_conntrack_handle_packet
+根据数据包L4的类型进行合法性检查，并更新连接状态（如超时时间）
+```c
+static int nf_conntrack_handle_packet(struct nf_conn *ct,
+				      struct sk_buff *skb,
+				      unsigned int dataoff,
+				      enum ip_conntrack_info ctinfo,
+				      const struct nf_hook_state *state)
+{
+	switch (nf_ct_protonum(ct)) {
+	case IPPROTO_TCP:
+		return nf_conntrack_tcp_packet(ct, skb, dataoff,
+					       ctinfo, state);
+	case IPPROTO_UDP:
+		return nf_conntrack_udp_packet(ct, skb, dataoff,
+					       ctinfo, state);
+	case IPPROTO_ICMP:
+		return nf_conntrack_icmp_packet(ct, skb, ctinfo, state);
+#if IS_ENABLED(CONFIG_IPV6)
+	case IPPROTO_ICMPV6:
+		return nf_conntrack_icmpv6_packet(ct, skb, ctinfo, state);
+#endif
+#ifdef CONFIG_NF_CT_PROTO_UDPLITE
+	case IPPROTO_UDPLITE:
+		return nf_conntrack_udplite_packet(ct, skb, dataoff,
+						   ctinfo, state);
+#endif
+#ifdef CONFIG_NF_CT_PROTO_SCTP
+	case IPPROTO_SCTP:
+		return nf_conntrack_sctp_packet(ct, skb, dataoff,
+						ctinfo, state);
+#endif
+#ifdef CONFIG_NF_CT_PROTO_DCCP
+	case IPPROTO_DCCP:
+		return nf_conntrack_dccp_packet(ct, skb, dataoff,
+						ctinfo, state);
+#endif
+#ifdef CONFIG_NF_CT_PROTO_GRE
+	case IPPROTO_GRE:
+		return nf_conntrack_gre_packet(ct, skb, dataoff,
+					       ctinfo, state);
+#endif
+	}
+
+	return generic_packet(ct, skb, ctinfo);
+}
+```
+
+##### nf_conntrack_icmp_packet
+该函数用于判定 ICMP 数据包是否合法，并更新连接跟踪表（conntrack table）中对应连接的状态和超时时间。其返回值决定了数据包在内核中的处理结果（接受、丢弃等）。
+```c
+int nf_conntrack_icmp_packet(struct nf_conn *ct,
+			     struct sk_buff *skb,
+			     enum ip_conntrack_info ctinfo,
+			     const struct nf_hook_state *state)
+{
+    // 作用：从连接跟踪条目 ct 中查找协议特定的超时配置（如 ICMP 默认超时时间）。
+    // 背景：不同协议（如 TCP/UDP/ICMP）的连接在无活动后会被自动回收，超时时间由内核参数控制。
+	unsigned int *timeout = nf_ct_timeout_lookup(ct);
+	static const u_int8_t valid_new[] = {
+		[ICMP_ECHO] = 1,
+		[ICMP_TIMESTAMP] = 1,
+		[ICMP_INFO_REQUEST] = 1,
+		[ICMP_ADDRESS] = 1
+	};
+
+	if (state->pf != NFPROTO_IPV4)
+		return -NF_ACCEPT;
+
+    // 仅允许icmp type为 ICMP_ECHO、ICMP_TIMESTAMP、ICMP_INFO_REQUEST、ICMP_ADDRESS 的数据包进入连接跟踪系统。
+	if (ct->tuplehash[0].tuple.dst.u.icmp.type >= sizeof(valid_new) ||
+	    !valid_new[ct->tuplehash[0].tuple.dst.u.icmp.type]) {
+		pr_debug("icmp: can't create new conn with type %u\n",
+			 ct->tuplehash[0].tuple.dst.u.icmp.type);
+		nf_ct_dump_tuple_ip(&ct->tuplehash[0].tuple);
+		return -NF_ACCEPT;
+	}
+
+    // 作用：若未找到协议特定超时，则使用网络命名空间（netns）中的默认 ICMP 超时值。
+    // 背景：超时配置可通过 /proc/sys/net/netfilter/nf_conntrack_icmp_timeout 调整。
+	if (!timeout)
+		timeout = &nf_icmp_pernet(nf_ct_net(ct))->timeout;
+
+    // 作用：更新连接的活跃时间戳，防止因超时被垃圾回收（GC）。
+    // 机制：每次收到属于该连接的数据包时，重置超时计时器，延长连接生命周期。
+	nf_ct_refresh_acct(ct, ctinfo, skb, *timeout);
+	return NF_ACCEPT;
+}
+```
+
+##### nf_conntrack_udp_packet
+核心功能是管理UDP连接的状态超时机制，并为NAT等上层功能提供支持。
+```c
+// ct：表示当前连接跟踪条目（conntrack entry），包含连接的五元组（源/目的IP、端口、协议）和状态信息。
+// skb：网络数据包的缓冲区指针。
+// dataoff：UDP头部在数据包中的偏移量。
+// ctinfo：连接跟踪状态标志（如新建连接、已有连接等）。
+// state：Netfilter钩子的上下文信息。
+int nf_conntrack_udp_packet(struct nf_conn *ct,
+			    struct sk_buff *skb,
+			    unsigned int dataoff,
+			    enum ip_conntrack_info ctinfo,
+			    const struct nf_hook_state *state)
+{
+	unsigned int *timeouts;
+
+    // 校验udp数据包的合法性
+	if (udp_error(skb, dataoff, state))
+		return -NF_ACCEPT;
+
+    // 超时策略加载：优先从连接跟踪条目中获取协议特定的超时配置（如用户自定义规则），若未定义则使用内核默认的UDP超时配置。
+    // UDP默认超时包含两种状态：
+    // UDP_CT_UNREPLIED：未收到双向流量的超时（通常较短，默认30秒）。
+    // UDP_CT_REPLIED：已建立双向通信的超时（默认180秒）。
+	timeouts = nf_ct_timeout_lookup(ct);
+	if (!timeouts)
+		timeouts = udp_get_timeouts(nf_ct_net(ct));
+
+    // 首次确认连接：若连接尚未确认（如新建连接），设置stream_ts为当前时间（jiffies）加2秒。
+    // 此字段用于判断UDP流是否持续活跃，超过该时间阈值后依旧活跃，则此连接可能升级为"Assured"状态。
+	if (!nf_ct_is_confirmed(ct))
+		ct->proto.udp.stream_ts = 2 * HZ + jiffies;
+
+    // 双向流量检测：IPS_SEEN_REPLY_BIT标志表示已观察到双向数据流（请求+响应）。
+    // 超时升级逻辑：
+    // 若当前时间超过stream_ts（即连接活跃超过2秒），将超时时间从UNREPLIED切换为REPLIED，并标记为流式传输（stream = true）。
+    // 此设计避免短暂探针（如DNS查询）占用过久跟踪资源，同时允许长连接（如视频流）维持更久。
+	if (test_bit(IPS_SEEN_REPLY_BIT, &ct->status)) {
+		unsigned long extra = timeouts[UDP_CT_UNREPLIED];
+		bool stream = false;
+
+        // 如果连接活跃时间跨度超过2s, 则认为他是流式连接
+		if (time_after(jiffies, ct->proto.udp.stream_ts)) {
+			extra = timeouts[UDP_CT_REPLIED];
+			stream = true;
+		}
+
+        // 更新连接
+        // 更新连接的报文，字节计数
+        // 增加连接的timeout阈值
+		nf_ct_refresh_acct(ct, ctinfo, skb, extra);
+
+        // 如果存在NAT冲突，则不需要将连接设置为 ASSURED 状态
+        // 因为这种连接很快会结束
+		if (unlikely((ct->status & IPS_NAT_CLASH)))
+			return NF_ACCEPT;
+
+        // 状态提升：对持续活跃的流（stream == true），
+        // 设置IPS_ASSURED_BIT标志并通过nf_conntrack_event_cache通知上层（如NAT模块）。
+		if (stream && !test_and_set_bit(IPS_ASSURED_BIT, &ct->status))
+			nf_conntrack_event_cache(IPCT_ASSURED, ct);
+	} else {
+        // 首次确认连接
+        // 更新连接的报文，字节计数
+        // 设置timetout为30s
+		nf_ct_refresh_acct(ct, ctinfo, skb, timeouts[UDP_CT_UNREPLIED]);
+	}
+	return NF_ACCEPT;
+}
+```
+无状态协议的状态跟踪：尽管UDP本身无连接，但通过超时机制和双向流量检测，内核仍能有效管理"虚拟连接"，为NAT、防火墙等功能奠定基础。
+动态超时调整：根据流量模式动态切换超时策略，平衡资源占用与连接保持需求。
+事件驱动机制：通过IPCT_ASSURED事件通知，实现与NAT等模块的解耦协作。
+附：UDP连接跟踪状态机
+
+| 状态      | 触发条件                     | 超时时间       |
+|-----------|------------------------------|----------------|
+| UNREPLIED | 仅单方向流量                 | 30秒（默认）   |
+| REPLIED   | 双向流量且持续超过2秒        | 180秒（默认）  |
+| ASSURED   | 持续活跃流                   | 同REPLIED      |
+
+##### nf_conntrack_tcp_packet
+```c
+// struct nf_conn *ct：当前连接的跟踪条目，包含协议状态、元组（源/目标 IP、端口）等信息。
+// struct sk_buff *skb：数据包缓冲区，用于提取 TCP 头部内容。
+// ctinfo：连接方向（如 IP_CT_ESTABLISHED、IP_CT_RELATED）。
+int nf_conntrack_tcp_packet(struct nf_conn *ct,
+			    struct sk_buff *skb,
+			    unsigned int dataoff,
+			    enum ip_conntrack_info ctinfo,
+			    const struct nf_hook_state *state)
+{
+	struct net *net = nf_ct_net(ct);
+	struct nf_tcp_net *tn = nf_tcp_pernet(net);
+	struct nf_conntrack_tuple *tuple;
+	enum tcp_conntrack new_state, old_state;
+	unsigned int index, *timeouts;
+	enum ip_conntrack_dir dir;
+	const struct tcphdr *th;
+	struct tcphdr _tcph;
+	unsigned long timeout;
+
+	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
+	if (th == NULL)
+		return -NF_ACCEPT;
+
+    // 校验TCP，确保数据包合法性
+	if (tcp_error(th, skb, dataoff, state))
+		return -NF_ACCEPT;
+
+    // 若连接未确认（!nf_ct_is_confirmed(ct)），
+    // 调用 tcp_new 初始化新连接（如处理 SYN 包）。
+	if (!nf_ct_is_confirmed(ct) && !tcp_new(ct, skb, dataoff, th))
+		return -NF_ACCEPT;
+
+	spin_lock_bh(&ct->lock);
+
+    // 状态表查询：根据数据包方向（dir）、
+    // TCP 标志（index）和旧状态（old_state），
+    // 从预定义的 tcp_conntracks 状态表中获取新状态（new_state）。
+    // 例如，收到 SYN-ACK 包时，状态可能从 TCP_CONNTRACK_SYN_SENT 
+    // 转换为 TCP_CONNTRACK_SYN_RECV。
+	old_state = ct->proto.tcp.state;
+	dir = CTINFO2DIR(ctinfo);
+	index = get_conntrack_index(th);
+	new_state = tcp_conntracks[dir][index][old_state];
+	tuple = &ct->tuplehash[dir].tuple;
+
+    // 根据预期状态进行数据包过滤
+    // 比如
+    // 挑战 ACK（Challenge ACK）：检测 RFC 5961 定义的盲复位攻击，通过 IP_CT_EXP_CHALLENGE_ACK 标志过滤无效 RST 包。
+    // 同时打开（Simultaneous Open）：处理双方同时发送 SYN 的情况，设置 IP_CT_TCP_SIMULTANEOUS_OPEN 标志。
+	switch (new_state) {
+	case TCP_CONNTRACK_SYN_SENT:
+		if (old_state < TCP_CONNTRACK_TIME_WAIT)
+			break;
+		if (((ct->proto.tcp.seen[dir].flags
+		      | ct->proto.tcp.seen[!dir].flags)
+		     & IP_CT_TCP_FLAG_CLOSE_INIT)
+		    || (ct->proto.tcp.last_dir == dir
+		        && ct->proto.tcp.last_index == TCP_RST_SET)) {
+			spin_unlock_bh(&ct->lock);
+
+			if (nf_ct_kill(ct))
+				return -NF_REPEAT;
+			return NF_DROP;
+		}
+		fallthrough;
+	case TCP_CONNTRACK_IGNORE:
+		if (index == TCP_SYNACK_SET
+		    && ct->proto.tcp.last_index == TCP_SYN_SET
+		    && ct->proto.tcp.last_dir != dir
+		    && ntohl(th->ack_seq) == ct->proto.tcp.last_end) {
+			old_state = TCP_CONNTRACK_SYN_SENT;
+			new_state = TCP_CONNTRACK_SYN_RECV;
+			ct->proto.tcp.seen[ct->proto.tcp.last_dir].td_end =
+				ct->proto.tcp.last_end;
+			ct->proto.tcp.seen[ct->proto.tcp.last_dir].td_maxend =
+				ct->proto.tcp.last_end;
+			ct->proto.tcp.seen[ct->proto.tcp.last_dir].td_maxwin =
+				ct->proto.tcp.last_win == 0 ?
+					1 : ct->proto.tcp.last_win;
+			ct->proto.tcp.seen[ct->proto.tcp.last_dir].td_scale =
+				ct->proto.tcp.last_wscale;
+			ct->proto.tcp.last_flags &= ~IP_CT_EXP_CHALLENGE_ACK;
+			ct->proto.tcp.seen[ct->proto.tcp.last_dir].flags =
+				ct->proto.tcp.last_flags;
+			nf_ct_tcp_state_reset(&ct->proto.tcp.seen[dir]);
+			break;
+		}
+		ct->proto.tcp.last_index = index;
+		ct->proto.tcp.last_dir = dir;
+		ct->proto.tcp.last_seq = ntohl(th->seq);
+		ct->proto.tcp.last_end =
+		    segment_seq_plus_len(ntohl(th->seq), skb->len, dataoff, th);
+		ct->proto.tcp.last_win = ntohs(th->window);
+
+		if (index == TCP_SYN_SET && dir == IP_CT_DIR_ORIGINAL) {
+			struct ip_ct_tcp_state seen = {};
+
+			ct->proto.tcp.last_flags =
+			ct->proto.tcp.last_wscale = 0;
+			tcp_options(skb, dataoff, th, &seen);
+			if (seen.flags & IP_CT_TCP_FLAG_WINDOW_SCALE) {
+				ct->proto.tcp.last_flags |=
+					IP_CT_TCP_FLAG_WINDOW_SCALE;
+				ct->proto.tcp.last_wscale = seen.td_scale;
+			}
+			if (seen.flags & IP_CT_TCP_FLAG_SACK_PERM) {
+				ct->proto.tcp.last_flags |=
+					IP_CT_TCP_FLAG_SACK_PERM;
+			}
+			if (old_state == TCP_CONNTRACK_LAST_ACK)
+				ct->proto.tcp.last_flags |=
+					IP_CT_EXP_CHALLENGE_ACK;
+		}
+		spin_unlock_bh(&ct->lock);
+		nf_ct_l4proto_log_invalid(skb, ct, "invalid packet ignored in "
+					  "state %s ", tcp_conntrack_names[old_state]);
+		return NF_ACCEPT;
+	case TCP_CONNTRACK_MAX:
+		if (nfct_synproxy(ct) && old_state == TCP_CONNTRACK_SYN_SENT &&
+		    index == TCP_ACK_SET && dir == IP_CT_DIR_ORIGINAL &&
+		    ct->proto.tcp.last_dir == IP_CT_DIR_ORIGINAL &&
+		    ct->proto.tcp.seen[dir].td_end - 1 == ntohl(th->seq)) {
+			pr_debug("nf_ct_tcp: SYN proxy client keep alive\n");
+			spin_unlock_bh(&ct->lock);
+			return NF_ACCEPT;
+		}
+
+		/* Invalid packet */
+		pr_debug("nf_ct_tcp: Invalid dir=%i index=%u ostate=%u\n",
+			 dir, get_conntrack_index(th), old_state);
+		spin_unlock_bh(&ct->lock);
+		nf_ct_l4proto_log_invalid(skb, ct, "invalid state");
+		return -NF_ACCEPT;
+	case TCP_CONNTRACK_TIME_WAIT:
+		if (old_state == TCP_CONNTRACK_LAST_ACK &&
+		    index == TCP_ACK_SET &&
+		    ct->proto.tcp.last_dir != dir &&
+		    ct->proto.tcp.last_index == TCP_SYN_SET &&
+		    (ct->proto.tcp.last_flags & IP_CT_EXP_CHALLENGE_ACK)) {
+			ct->proto.tcp.last_flags &= ~IP_CT_EXP_CHALLENGE_ACK;
+			spin_unlock_bh(&ct->lock);
+			nf_ct_l4proto_log_invalid(skb, ct, "challenge-ack ignored");
+			return NF_ACCEPT; /* Don't change state */
+		}
+		break;
+	case TCP_CONNTRACK_SYN_SENT2:
+		ct->proto.tcp.last_flags |= IP_CT_TCP_SIMULTANEOUS_OPEN;
+		break;
+	case TCP_CONNTRACK_SYN_RECV:
+		if (dir == IP_CT_DIR_REPLY && index == TCP_ACK_SET &&
+		    ct->proto.tcp.last_flags & IP_CT_TCP_SIMULTANEOUS_OPEN)
+			new_state = TCP_CONNTRACK_ESTABLISHED;
+		break;
+	case TCP_CONNTRACK_CLOSE:
+		if (index != TCP_RST_SET)
+			break;
+
+		if (ct->proto.tcp.seen[!dir].flags & IP_CT_TCP_FLAG_MAXACK_SET) {
+			u32 seq = ntohl(th->seq);
+
+			if (before(seq, ct->proto.tcp.seen[!dir].td_maxack)) {
+				/* Invalid RST  */
+				spin_unlock_bh(&ct->lock);
+				nf_ct_l4proto_log_invalid(skb, ct, "invalid rst");
+				return -NF_ACCEPT;
+			}
+
+			if (!nf_conntrack_tcp_established(ct) ||
+			    seq == ct->proto.tcp.seen[!dir].td_maxack)
+				break;
+
+			if (ct->proto.tcp.last_index == TCP_ACK_SET &&
+			    ct->proto.tcp.last_dir == dir &&
+			    seq == ct->proto.tcp.last_end)
+				break;
+                
+			new_state = old_state;
+		}
+		if (((test_bit(IPS_SEEN_REPLY_BIT, &ct->status)
+			 && ct->proto.tcp.last_index == TCP_SYN_SET)
+			|| (!test_bit(IPS_ASSURED_BIT, &ct->status)
+			    && ct->proto.tcp.last_index == TCP_ACK_SET))
+		    && ntohl(th->ack_seq) == ct->proto.tcp.last_end) {
+			goto in_window;
+		}
+		break;
+	default:
+		break;
+	}
+
+    // TCP 选项解析：在 SYN 包中解析窗口缩放（Window Scale）和 SACK 选项，保存到 ct->proto.tcp 结构。
+    // 序列号校验：通过 tcp_in_window 验证数据包序列号是否在预期窗口内，防止无效数据干扰连接状态。
+	if (!tcp_in_window(ct, &ct->proto.tcp, dir, index,
+			   skb, dataoff, th)) {
+		spin_unlock_bh(&ct->lock);
+		return -NF_ACCEPT;
+	}
+     in_window:
+	/* From now on we have got in-window packets */
+	ct->proto.tcp.last_index = index;
+	ct->proto.tcp.last_dir = dir;
+
+	pr_debug("tcp_conntracks: ");
+	nf_ct_dump_tuple(tuple);
+	pr_debug("syn=%i ack=%i fin=%i rst=%i old=%i new=%i\n",
+		 (th->syn ? 1 : 0), (th->ack ? 1 : 0),
+		 (th->fin ? 1 : 0), (th->rst ? 1 : 0),
+		 old_state, new_state);
+
+	ct->proto.tcp.state = new_state;
+	if (old_state != new_state
+	    && new_state == TCP_CONNTRACK_FIN_WAIT)
+		ct->proto.tcp.seen[dir].flags |= IP_CT_TCP_FLAG_CLOSE_INIT;
+
+    // 动态获得超时时间
+    // 超时设置：根据新状态从预定义超时表（tn->timeouts）中选择超时时间。例如，TCP_CONNTRACK_ESTABLISHED 使用默认超时，而重传过多时切换为 TCP_CONNTRACK_RETRANS 超时。
+	timeouts = nf_ct_timeout_lookup(ct);
+	if (!timeouts)
+		timeouts = tn->timeouts;
+
+	if (ct->proto.tcp.retrans >= tn->tcp_max_retrans &&
+	    timeouts[new_state] > timeouts[TCP_CONNTRACK_RETRANS])
+		timeout = timeouts[TCP_CONNTRACK_RETRANS];
+	else if (unlikely(index == TCP_RST_SET))
+		timeout = timeouts[TCP_CONNTRACK_CLOSE];
+	else if ((ct->proto.tcp.seen[0].flags | ct->proto.tcp.seen[1].flags) &
+		 IP_CT_TCP_FLAG_DATA_UNACKNOWLEDGED &&
+		 timeouts[new_state] > timeouts[TCP_CONNTRACK_UNACK])
+		timeout = timeouts[TCP_CONNTRACK_UNACK];
+	else if (ct->proto.tcp.last_win == 0 &&
+		 timeouts[new_state] > timeouts[TCP_CONNTRACK_RETRANS])
+		timeout = timeouts[TCP_CONNTRACK_RETRANS];
+	else
+		timeout = timeouts[new_state];
+	spin_unlock_bh(&ct->lock);
+
+    // 状态事件触发：若状态变化（如进入 ESTABLISHED），通过 nf_conntrack_event_cache 通知其他模块（如 NAT 或防火墙）。
+	if (new_state != old_state)
+		nf_conntrack_event_cache(IPCT_PROTOINFO, ct);
+
+	if (!test_bit(IPS_SEEN_REPLY_BIT, &ct->status)) {
+		if (th->rst) {
+			nf_ct_kill_acct(ct, ctinfo, skb);
+			return NF_ACCEPT;
+		}
+
+		if (index == TCP_SYN_SET && old_state == TCP_CONNTRACK_SYN_SENT) {
+			return NF_ACCEPT;
+		}
+
+		if (new_state == TCP_CONNTRACK_ESTABLISHED &&
+		    timeout > timeouts[TCP_CONNTRACK_UNACK])
+			timeout = timeouts[TCP_CONNTRACK_UNACK];
+	} else if (!test_bit(IPS_ASSURED_BIT, &ct->status)
+		   && (old_state == TCP_CONNTRACK_SYN_RECV
+		       || old_state == TCP_CONNTRACK_ESTABLISHED)
+		   && new_state == TCP_CONNTRACK_ESTABLISHED) {
+		set_bit(IPS_ASSURED_BIT, &ct->status);
+		nf_conntrack_event_cache(IPCT_ASSURED, ct);
+	}
+	nf_ct_refresh_acct(ct, ctinfo, skb, timeout);
+
+	return NF_ACCEPT;
+}
+```
+
+##### generic_packet
+该函数generic_packet是Linux内核网络连接跟踪（Netfilter Conntrack）模块中用于处理通用协议数据包的核心函数。其作用是通过更新连接状态和超时时间，维护网络连接的跟踪信息
+```c
+// 输入参数：
+// struct nf_conn *ct：表示当前跟踪的网络连接（如TCP/UDP连接）。
+// struct sk_buff *skb：指向待处理的数据包缓冲区。
+// enum ip_conntrack_info ctinfo：连接跟踪状态信息（如新建连接、已有连接等）。
+static int generic_packet(struct nf_conn *ct, struct sk_buff *skb,
+			  enum ip_conntrack_info ctinfo)
+{
+    // 尝试从连接跟踪条目ct中获取协议特定的超时配置。例如，某些协议（如FTP）可能自定义超时时间。
+	const unsigned int *timeout = nf_ct_timeout_lookup(ct);
+
+    // 若未找到自定义超时（timeout == NULL），则通过nf_generic_pernet获取当前网络命名空间的全局默认超时值。这确保了即使协议未显式定义超时，连接仍能基于系统默认值管理生命周期。
+	if (!timeout)
+		timeout = &nf_generic_pernet(nf_ct_net(ct))->timeout;
+
+    // 连接状态刷新
+    // 此函数完成两个核心操作：
+    // 1.更新超时时间：将连接的超时时间延长为当前时间加上*timeout值，防止因空闲而过期。
+    // 2.流量统计：记录数据包的字节数和数量，用于连接级别的流量监控。
+	nf_ct_refresh_acct(ct, ctinfo, skb, *timeout);
+	return NF_ACCEPT;
+}
+```
+
+### nf_conntrack_confirm
+nf_conntrack_confirm() 负责确认一个连接跟踪条目（nf_conn）的有效性，并将其首次完成确认的连接正式加入全局连接跟踪表。
+
+1. 函数功能概述
+此函数的主要作用是对临时连接跟踪条目进行最终确认，将其从“未确认列表”（unconfirmed list）移至“确认列表”（confirmed list），并触发相关事件处理。
+
+2 . 调用时机与上下文
+此函数通常在以下 Netfilter Hook 点被调用：
+
+NF_INET_POST_ROUTING：数据包离开本机前（如转发或本地生成的数据包）。
+NF_INET_LOCAL_IN：数据包目标为本机时。
+其目的是在连接的第一个数据包通过关键路径后，确保连接跟踪条目被正式记录，避免因未确认条目过多导致内存泄漏或性能问题。
+
+```c
+/* 确认连接：返回NF_DROP表示数据包必须丢弃。 */
+static inline int nf_conntrack_confirm(struct sk_buff *skb)
+    // 获取连接跟踪条目
+	struct nf_conn *ct = (struct nf_conn *)skb_nfct(skb);
+	int ret = NF_ACCEPT;
+	if (ct) {
+        // 检查是否已确认
+		if (!nf_ct_is_confirmed(ct)) {
+            // 进行实际确认操作
+			ret = __nf_conntrack_confirm(skb);
+			if (ret == NF_ACCEPT)
+				ct = (struct nf_conn *)skb_nfct(skb);
+
+		if (likely(ret == NF_ACCEPT))
+            // 事件传递
+            // 处理缓存的事件（如 NAT 转换后的通知事件）
+			nf_ct_deliver_cached_events(ct);
+
+	return ret;
+```
+
+#### __nf_conntrack_confirm
+```c
+/* 确认传入的连接，并将其存入散列表中 */
+int __nf_conntrack_confirm(struct sk_buff *skb)
+	unsigned int hash, reply_hash;
+	struct nf_conntrack_tuple_hash *h;
+	struct nf_conn *ct;
+	struct nf_conn_help *help;
+	struct hlist_nulls_node *n;
+	enum ip_conntrack_info ctinfo;
+	unsigned int sequence;
+	int ret = NF_DROP;
+
+	ct = nf_ct_get(skb, &ctinfo);
+
+	if (CTINFO2DIR(ctinfo) != IP_CT_DIR_ORIGINAL)
+		return NF_ACCEPT;
+
+	do {
+        // 获取顺序锁的序列号
+		sequence = read_seqcount_begin(&nf_conntrack_generation);
+        // 获得请求方向的哈希值
+		hash = *(unsigned long *)&ct->tuplehash[IP_CT_DIR_REPLY].hnnode.pprev;
+        // 缩放哈希值
+		hash = scale_hash(hash);
+        // 获得响应方向的哈希值
+		reply_hash = hash_conntrack(net,
+					   &ct->tuplehash[IP_CT_DIR_REPLY].tuple);
+
+        // 对请求/响应相关的两个哈希桶加锁
+	} while (nf_conntrack_double_lock(net, hash, reply_hash, sequence));
+
+    // 过滤已确认的连接
+	if (unlikely(nf_ct_is_confirmed(ct))) {
+		nf_conntrack_double_unlock(hash, reply_hash);
+		local_bh_enable();
+		return NF_DROP;
+
+    // 从未确认列表移除
+	nf_ct_del_from_dying_or_unconfirmed_list(ct);
+        struct ct_pcpu *pcpu;
+        pcpu = per_cpu_ptr(nf_ct_net(ct)->ct.pcpu_lists, ct->cpu);
+        hlist_nulls_del_rcu(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode);
+
+    // 如果连接已死亡，则加到已死亡列表
+	if (unlikely(nf_ct_is_dying(ct))) {
+		nf_ct_add_to_dying_list(ct);
+            hlist_nulls_add_head(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode,
+                         &pcpu->dying);
+		NF_CT_STAT_INC(net, insert_failed);
+		goto dying;
+	}
+
+    // 若相同元组的连接已经加入已确认表
+    // 则处理冲突
+	hlist_nulls_for_each_entry(h, n, &nf_conntrack_hash[hash], hnnode)
+		if (nf_ct_key_equal(h, &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
+				    zone, net))
+			goto out;
+
+	hlist_nulls_for_each_entry(h, n, &nf_conntrack_hash[reply_hash], hnnode)
+		if (nf_ct_key_equal(h, &ct->tuplehash[IP_CT_DIR_REPLY].tuple,
+				    zone, net))
+			goto out;
+
+    // 增加连接的生命周期
+	ct->timeout += nfct_time_stamp;
+
+    // 将连接设置为已确认
+    // 启动超时计时器
+	__nf_conntrack_insert_prepare(ct);
+        ct->status |= IPS_CONFIRMED;
+        tstamp = nf_conn_tstamp_find(ct);
+        if (tstamp)
+            tstamp->start = ktime_get_real_ns();
+
+    // 将连接加入已确认表
+	__nf_conntrack_hash_insert(ct, hash, reply_hash);
+        hlist_nulls_add_head_rcu(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode,
+                   &nf_conntrack_hash[hash]);
+        hlist_nulls_add_head_rcu(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode,
+                   &nf_conntrack_hash[reply_hash]);
+
+	local_bh_enable();
+
+    // 处理应用层协议（如 FTP、SIP）
+    // 应用层协议支持：通过 Helper 解析协议内容（如 FTP 端口命令），动态创建期望连接（Expectation）。
+	help = nfct_help(ct);
+	if (help && help->helper) 
+		nf_conntrack_event_cache(IPCT_HELPER, ct);
+
+    // 发送连接创建事件
+    // 事件通知：通知上层模块（如 NAT、防火墙）连接状态变化，触发后续处理。
+	nf_conntrack_event_cache(master_ct(ct) ?
+				 IPCT_RELATED : IPCT_NEW, ct);
+
+	return NF_ACCEPT;
+
+out:
+    // 处理哈希冲突
+	ret = nf_ct_resolve_clash(skb, h, reply_hash);
+dying:
+    // 将连接从已确认表移除
+	nf_conntrack_double_unlock(hash, reply_hash);
+	local_bh_enable();
+	return ret;
+```
 
 
 ## 核心数据结构
@@ -1606,6 +2233,87 @@ struct nf_conntrack_zone {
 	u8	dir;
 };
 ```
+
+### nf_conn_help
+该结构体用于存储与连接跟踪（nf_conn）关联的辅助模块（Helper）信息，主要用于支持需要应用层协议识别的连接（如 FTP、SIP 等）。
+```c
+struct nf_conn_help {
+    // 表示当前连接绑定的协议辅助模块。
+    // 例如，FTP 辅助模块会在此处注册，用于解析 FTP 协议的控制通道并动态打开数据通道。
+	struct nf_conntrack_helper __rcu *helper;
+
+    // 哈希链表头，用于管理该连接预期的子连接（Expectations）。
+    // 例如，FTP 协议在主动模式下会通过 expectations 预分配数据通道的连接跟踪条目。
+	struct hlist_head expectations;
+
+    // 数组记录当前连接预期的子连接类型及数量。
+    // NF_CT_MAX_EXPECT_CLASSES 定义了最大支持的预期连接类型数，避免资源耗尽。
+	u8 expecting[NF_CT_MAX_EXPECT_CLASSES];
+
+    // 用户态或内核态辅助模块的私有数据存储区，长度为 32 字节。
+    // 例如，SIP ALG 可能在此存储会话标识符或临时端口信息。
+	char data[32] __aligned(8);
+};
+```
+
+#### nf_conntrack_helper
+```c
+struct nf_conntrack_helper {
+	struct hlist_node hnode;	/* Internal use. */
+
+	char name[NF_CT_HELPER_NAME_LEN]; /* name of the module */
+	refcount_t refcnt;
+	struct module *me;		/* pointer to self */
+
+    // 定义预期子连接的超时策略和最大数量。
+    // 例如，限制 FTP 数据通道的预期连接数以防止资源滥用。
+	const struct nf_conntrack_expect_policy *expect_policy;
+
+    // 定义辅助模块匹配的 五元组规则（协议、源/目的 IP 和端口）。
+    // 例如，SIP 辅助模块可能匹配目标端口为 5060 的 UDP 流量。
+	struct nf_conntrack_tuple tuple;
+
+    // 核心回调函数，当数据包匹配 tuple 时被调用。
+    // 该函数负责解析应用层协议（如 FTP 的 PORT 命令），并创建预期的子连接（通过 nf_conntrack_expect）。
+	int (*help)(struct sk_buff *skb,
+		    unsigned int protoff,
+		    struct nf_conn *ct,
+		    enum ip_conntrack_info conntrackinfo);
+
+	void (*destroy)(struct nf_conn *ct);
+
+	int (*from_nlattr)(struct nlattr *attr, struct nf_conn *ct);
+	int (*to_nlattr)(struct sk_buff *skb, const struct nf_conn *ct);
+	unsigned int expect_class_max;
+
+    // 控制辅助模块的行为，例如是否支持 NAT 或用户态协作。
+	unsigned int flags;
+	unsigned int queue_num;
+
+    // 指定 nf_conn_help.data 字段的长度，用于用户态辅助模块传递私有数据
+	u16 data_len;
+
+    /* NAT 辅助模块的名称 */
+	char nat_mod_name[NF_CT_HELPER_NAME_LEN];
+};
+```
+#### 工作流程
+1. 连接初始化
+当数据包首次匹配某个 nf_conntrack_helper 的 tuple 时，内核会为该连接创建 nf_conn_help 结构体，并绑定对应的 Helper。
+
+2. 协议解析
+后续数据包触发 help 函数，解析应用层协议（如 FTP 控制指令），生成预期连接（如数据通道的端口信息）并插入 expectations 链表。
+
+3. 子连接处理
+当预期连接的数据包到达时，内核通过 expectations 匹配并关联到父连接，完成状态跟踪和 NAT 转换。
+
+4. 扩展机制的限制
+内存限制
+所有扩展（包括 nf_conn_help）的总长度不能超过 255 字节，因 nf_ct_ext.len 为 u8 类型。
+注册流程
+新增 Helper 需通过 nf_ct_extend_register 注册到全局数组 nf_ct_ext_types，并在 total_extension_size 中统计扩展长度。
+总结
+这两个结构体共同实现了连接跟踪的 应用层协议感知能力。nf_conntrack_helper 定义协议处理规则，而 nf_conn_help 在具体连接中存储运行时状态，二者通过扩展机制动态绑定，支撑了 NAT ALG、有状态防火墙等高级功能。
 
 # nf hook
 ## 内核使用 nf hook 
