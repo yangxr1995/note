@@ -94,8 +94,7 @@ cmake --build ./build-linux
 - 块注释
   - `#[[第一行注释 第二行注释]]`
 
-## message
-基础使用
+## 日志
 ```bash
 message(参数1 参数2)
 ```
@@ -113,7 +112,6 @@ CMakeLists.txt可用的日志参数
 - DEBUG 针对开发人员简单信息 stdout
 - TRACE 针对开发人员的详细信息 stdout
 
-示例
 ```bash
 # 会打印文件和行号
 message(FATAL_ERROR "严重错误，cmake退出")
@@ -136,8 +134,7 @@ message(STATUS "STATUS")
 # 默认不打印 -- 前缀 用户感兴趣的详细信息
 message(VERBOSE "VERBOSE")
 ```
-## 查找库日志
-
+### 设置缩进
 ```bash
 # 开始查找
 message(CHECK_START "查找lib1")
