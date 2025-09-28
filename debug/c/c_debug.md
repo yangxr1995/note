@@ -1,6 +1,19 @@
 [[toc]]
 
 # gdb
+## 启动
+```bash
+# 1. 命令行启动带参程序
+# --args 为命令行参数
+# ./test file.txt -v
+gdb --args ./test file.txt --v
+
+# 2. 后期设置参数
+gdb ./test
+(gdb) set args ./test file.txt --v
+(gdb) show args
+
+```
 ## 查看和修改
 info args   查看函数参数
 info locals 查看局部变量
@@ -222,6 +235,15 @@ gdb --symbol=被调试的debug版本--exec=被调试的release版本
 objcopy --only-keep-debug debug-elf debug.sym
 gdb --symbol=debug.sym --exec=被调试的release版本
 
+## 高级
+### 条件断点
+```bash
+# func1 被func2调用时，给func1打断点
+b func1 if $_caller_is ("func2")
+# func1 返回，查看func1的返回值
+finish
+```
+
 # gdbserver
 将没有debug信息的文件上传到开发板，使用gdbserver开启调试
 ```shell
@@ -354,3 +376,10 @@ void __wrap_free(void *ptr)
 ```
 
 
+#
+```bash
+# 检测内存错误并等待 GDB 连接
+valgrind --vgdb=yes --vgdb-error=0 --leak-check=full ./your_program
+
+
+```
