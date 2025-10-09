@@ -2639,7 +2639,7 @@ cwnd到达 ssthresh 后线性增加 cwnd: `cwnd += SMSS * SMSS / cwnd`
   - 每收到一个重复 ACK，cwnd 增加 1 个 MSS
   - 当新数据 ACK 到达后，设置 cwnd 为 ssthresh
 
-## 测量拥塞
+## 基于测量驱动的拥塞控制
 ### 从丢包驱动到测量驱动
 
 #### 为什么会出现拥塞
@@ -2856,5 +2856,417 @@ function send(packet)
 // 6. 更新下一次发送时间并设置定时器
     timerCallbackAt(send, nextSendTime)
 ```
+
+# wireshark 检查tcp拥塞控制
+关键参数
+发送速率（sending rate）
+交付速率（delivery rate）
+拥塞窗口（cwnd）
+往返时延（RTT）
+缓冲区大小（Buffer Size）
+排队延迟（Queuing Time）
+带宽延迟积（BDP）
+
+## 网络缓存区
+
+任何实际网络链路都可以总结为高速链路加低速链路，当高速链路的输入速度大于低速链路时，出现丢包。
+
+          ┌────────────────────────────┐
+          │                            ┌──────────────────────────────┐
+          │       200bps               │           100bps             │
+          │                            └──────────────────────────────┘
+          └────────────────────────────┘
+
+为了缓解丢包，在链路直接增加了缓冲区
+
+                                         buffer
+                                       ┌────────┐
+          ┌────────────────────────────│        │
+          │                            │        ┌──────────────────────┐
+          │       200bps               │当前水位│      100bps          │
+          │                            ├────────┴──────────────────────┘
+          └────────────────────────────│        │
+                                       └────────┘
+
+但即使加入缓冲区，若高速链路持续输入，则会导致缓冲区满，仍然会导致丢包
+
+                                          buffer                          
+                                 满  ──►┌────────┐                        
+           ┌────────────────────────────│        │                        
+           │                            │        ┌──────────────────────┐ 
+           │       200bps               │        │      100bps          │ 
+           │                            │        ┼──────────────────────┘ 
+           └────────────────────────────│        │                        
+                                        └────────┘                        
+
+## 端到端网络模型
+不管实际网络环境多复杂，从tcp视角看，这个路径都可以被简化为一个极简的模型
+
+
+                                        network buffer                          
+                                        ┌────────┐                        
+           ┌────────────────────────────│        │                        
+           │                            │        ┌──────────────────────┐ 
+    sender │                            │        │                      │  receiver
+           │                            │        ┼──────────────────────┘ 
+           └────────────────────────────│        │       低速链路                 
+                     高速链路           └────────┘                        
+ 
+端到端网络模型的关键物理量:
+BaseRTT: 无排队情况下的最短往返时延
+瓶颈带宽(Bottleneck Bandwidth BtlBw): 链路最窄带宽
+带宽时延(BDP) = 瓶颈带宽(BtlBw) x 基础RTT(BaseRTT)
+即在不丢包的前提下把整个路径灌满，需要多少数据量
+
+
+              appLimited          BandwidthLimited              bufferLimited
+            ▲           ▲                                     ▲
+            │           │                                   ┌─B- - - - -
+            │           │                              ┌────┘ │
+            │           │                         ┌────┘      │
+            │           │ RTT=BaseRTT        ┌────┘           │maxQueuingTime
+       RTT  │           │  +QueuingTime ┌────┘                │
+            │           │          ┌────┘                     │
+            │ baseRTT   │     ┌────┘                          │
+            ├───────────A─────┘ - - - - - - - - - -  - - - - -│- - - - - 
+            │           │                                     │
+            │           │                                     │                  整个过程分为三阶段
+            ┴───────────┼─────────────────────────────────────┼───────►          appLimited(应用受限区): 应用发的慢，tcp未用满带宽
+                        │                                     │                  BandwidthLimited(带宽受限区): 发送速率超过可用带宽，带宽成为限制因素
+                        │                                   ┌─B - - - -          bufferLimited(缓存受限区): 缓存满了且继续加速导致丢包
+            ▲           │                               ┌───┘ │         
+            │           │                           ┌───┘     │         
+            │           │ cwnd,bytesSendPerRTT= ┌───┘         │         
+            │           │ maxInflight       ┌───┘             │         
+            │           │               ┌───┘                 │bufferSize         
+       cwnd │           │           ┌───┘                     │                  最佳控制点(A点)：
+            │           │       ┌───┘                         │                  发送刚好利用满带宽，缓存区还没有排队，这时RTT是最小的，但带宽利用率
+            │  BtlBw    │   ┌───┘                             │                  是百分百的.
+            │- - -  -┌──A───┘ - - - - - - - - - - - - - - - - │ - - - - 
+            │     ┌──┘  │                                     │         
+            │  ┌──┘     │                                     │                  基于丢包拥塞控制点（B点）
+            ┴──┴────────┼─────────────────────────────────────┼───────►          buffer被占满，开始丢包
+                        │                                     │
+                        │                                     │
+            ▲           │                                     │         
+            │           │                                     │                                                                                                                                                                                                       
+            │           │                                     │         
+            │           │                                  ┌──B - - - -          
+            │           │   bytesSentPerBaseRTT ->  ┌──────┘  │         
+            │           │   sendingRate      ┌──────┘         │         
+  sendRate  │           │             ┌──────┘                │         
+deliveryRate│           │      ┌──────┘                       │         
+            │  BtlBw    ├──────┘                              │         
+            │- - -  -┌──A─────────────────────────────────────┤ - - - -          
+            │     ┌──┘  │   ackedBytesPerRTT -> deliveryRate  │
+            │  ┌──┘     │                                     │         
+            ┴──┴────────┴─────────────────────────────────────┴───────► 
+                                time                                        
+
+
+
+拥塞算法分类
+
+
+当cwnd超过BDP时进行拥塞控制: BBR
+
+基于丢包拥塞控制点：Reno,Cubic
+
+当RTT超过BaseRTT时: Vegas
+
+## 实验环境
+```bash
+# 模拟带宽受限环境
+tc qdisc del dev eth0 root
+tc qdisc add dev eth0 root handle 1: htb default 11
+# 设置总带宽为 60Mbps
+tc class add dev eth0 parent 1: classid 1:1 htb rate 60mbit
+# 创建子类，沿用 60Mbps限速
+tc class add dev eth0 parent 1:1 classid 1:11 htb rate 60mbit
+# 在子类上挂接fifo队列，最大长度为1000个包
+tc qdisc add dev eth0 parent 1:11 handle 10: pfifo limit 1000
+
+# 模拟网络时延
+tc qdisc del dev eth1 root
+# 模拟时延 40ms
+tc qdisc add dev eth1 root netem delay 40ms
+```
+
+## 网络时延
+Latency
+Latency（单程延迟）是指一个数据包从发送端出发，到达接收端所经历的总时间。
+- Propagation Delay（传播延迟）
+- Transmission Delay（传输延迟）
+- Processing Delay（处理延迟）
+- Queuing Delay（排队延迟）
+
+注意：一般来讲，排队延迟是唯一一个非固定、随时变动的延迟项。
+
+总延迟计算公式：
+Latency = Propagation Delay + Transmission Delay + Processing Delay + Queuing Delay
+
+TCP使用RTT而不是 Latency，因为 RTT易于测量且反馈全面
+
+RTT (Round-Trip Time)
+RTT 是从 sender 发出一个数据包，到收到 receiver 发回的 ACK 所用的总时间。
+- Sender → Receiver 的单程延迟
+- ACK delay: Receiver 处理数据与生成 ACK 的延迟
+- ACK 从 Receiver 返回到 Sender 的单程延迟
+
+在 TCP 中常见的 RTT 定义包括：
+- RTprop/BaseRTT/Min.RTT：最小 RTT，不含排队延迟，反映物理路径最短延迟
+- RTT：实际观测到的完整往返时间
+- iRTT：初始 RTT，通常是三次握手中测得的 RTT（Wireshark 中也使用此术语）
+- 计算方法为: 
+iRTT：是 TCP 三次握手阶段的往返时间，即 “第一个 SYN 包发送” 到 “第三个 ACK 包接收” 的时间差 .
+BaseRTT：是 TCP 连接存续期间持续测量到的最小 RTT，代表 “物理路径的最短延迟”（不含排队等动态延迟），反映网络路径的固有传输特性。
+
+iRTT和BaseRTT的关系:
+- 初始参考关系：iRTT 是 BaseRTT 的初始候选值。三次握手时，网络尚未承载数据传输，排队延迟少，iRTT 更接近 “路径固有延迟”，因此可为 BaseRTT 的初始估计提供依据。
+- 动态优化关系：BaseRTT 是对 iRTT 的持续优化。连接建立后，TCP 会持续测量 RTT（如数据传输过程中 ACK 与数据的往返时间），并筛选出最小的 RTT 样本作为 BaseRTT。它比 iRTT 更精准地反映 “无拥塞时的路径延迟”（因为 iRTT 可能包含三次握手时协议栈的额外处理延迟，而 BaseRTT 会在后续传输中排除这些干扰，找到更小时延）。
+- 两者共同支撑 TCP 的 RTT 相关机制：
+  - iRTT 的作用：为连接初期的重传超时（RTO）计算提供初始值（让 TCP 刚建立连接时就能大致判断 “多久没收到 ACK 算超时”）。
+  - BaseRTT 的作用：用于更精细的拥塞控制算法，帮助 TCP 区分 “路径固有延迟” 和 “拥塞导致的额外延迟”，提升传输效率。
+  - 简言之，iRTT 是 BaseRTT 的 “初始种子”，BaseRTT 是 iRTT 的 “精准优化版”，两者协同保障 TCP 对往返时间的感知与拥塞控制。
+
+AckDelay
+receiver从收到数据包到生成ACK所需要的时间，这个时间通常很短，但由于TCP的某些机制可能会影响RTT.
+影响RTT的AckDelay机制:
+- 延迟确认(Delayed ACK) : TCP为了减少ACK，会故意等200ms以内
+- LRO和GRO技术: 将多个TCP小包合并为一个大包再发送
+
+
+如何测量RTT
+
+    
+         Sender               router                 Receiver                    Sender               router                 Receiver
+    
+           │                     │                     │                            │                    │                    │
+        ▲  ├─────┐  seg          │                     │                          ▲ ├─────┐              │                    │
+        │  │     └─────┐         │                     │                          │ │     └─────┐seg     │                    │
+        │  │           └─────┐   │立即转发             │                          │ │           └─────┐  │                    │
+        │  │                 └───┼─┐                   │                          │ │                 └─►│▲                   │
+        │  │                   ▲ │ └─────┐             │                          │ │                    ││ QueuingDelay      │
+        │  │                   │ │       └─────┐       │                          │ │                    ││                   │
+        │  │                   │ │             └─────┐ │                          │ │                    │▼                   │
+        │  │                   │ │                   └►│▲                         │ │                    ├─────┐              │
+BaseRTT │  │              RTT1 │ │                     ││                         │ │                    │     └─────┐        │
+        │  │                   │ │                     ││AckDelay       BaseRTT + │ │                    │           └─────┐  │
+        │  │                   │ │                     ││           QueuingDelay  │ │                    │                 └─►│▲
+        │  │                   │ │               ┌─────┤▼                         │ │                    │                    ││
+        │  │                   │ │         ┌─────┘     │                          │ │                    │                    ││ AckDelay
+        │  │                   ▼ │   ┌─────┘           │                          │ │                    │                    ││
+        │  │                   ┌─┼───┘                 │                          │ │                    │             ┌──────│▼
+        │  │             ┌─────┘ │                     │                          │ │                    │       ┌─────┘      │
+        │  │       ┌─────┘       │                     │                          │ │                    │ ┌─────┘            │
+        │  │ ┌─────┘ack          │                     │                          │ │                ┌───┼─┘                  │
+        ▼  │◄┘                   │                     │                          │ │          ┌─────┘   │                    │
+           │                     │                     │                          │ │    ┌─────┘ack      │                    │
+           │                     │                     │                          ▼ │◄───┘               │                    │
+           ▼                     ▼                     ▼                            ▼                    ▼                    ▼
+      RTT without queuing                                                          RTT with queuing
+
+当没有排队时延时，发送方和中间设备转换的RTT相等，当考虑排队时延时，必须在发送方进行抓包
+
+
+## 网络拥塞和速率
+
+术语
+- Speed（接口速率）
+  - 指网络接口（如网卡、交换机端口）的最大传输速率。比如，常见的100Mbps，1Gbps，2.5Gbps，10Gbps，40Gbps，100Gbps，400Gbps等。
+- Bandwidth（带宽）
+  - 指整个链路或其中一条路径在单位时间内理论可传输的数据量，常用于描述路径容量。
+- BtlBw（Bottleneck Bandwidth）
+  - 即路径中的“瓶颈带宽”，也就是最低速率的环节限制了整条路径的吞吐能力。
+
+Sending Rate：发送端实际发出的数据速率（也叫throughout）
+Delivery Rate：接收端实际成功接收并 ACK 的数据速率（也叫 Goodput）
+
+| 情况                 | 含义                                  |
+| -------------------- | ------------------------------------- |
+| 发送速率 > 交付速率  | 网络拥塞，buffer 被使用               |
+| 发送速率 ≈ 交付速率 | 网络带宽不构成限制                    |
+| 发送速率 < 交付速率  | Buffer依然被占用 + send rate < btlbw  |
+
+（视角：Sender视角）
+
+在Wireshark中观察Sending rate和Delivery Rate：
+- Sender 端观测：throughput ≈ Sending Rate；goodput ≈ Delivery Rate
+- Receiver 端观测：throughput = send rate = goodput = Delivery Rate
+
+## 网络拥塞和BDP
+BDP（Bandwidth-Delay Product）：网络路径的带宽和延迟的乘积，表示在没有队列的情况下，在给定的带宽和延迟条件下，网络路径可以容纳的数据量（也是网络中可以“飞行”（inflight）的最大数据量）。
+
+带宽时延积 = 瓶颈带宽 × 基础RTT（即BDP = BtlBw × BaseRTT）
+
+示例1：
+Btlbw=1 Gbps，RTT 为 100 ms
+BDP = 1,000,000,000 bps × 0.1 s = 100,000,000 bits = 12.5 MB
+
+示例2：
+Btlbw=10Mbps，RTT 为 1 ms
+BDP = 10,000,000 × 0.001 = 10,000 bits = 1.25 KB
+
+BDP值意味着使用多大的发送窗口就能跑满带宽。
+
+## 
+本节Topics：
+- 接收窗口（rwnd, Receive Window）
+- 拥塞窗口（cwnd, Congestion Window）
+- 实际发送窗口（Send Window, swnd, Effective Window）
+- Bytes in flight
+  - 已经发出但还没有收到确认的数据量
+- 拥塞时的拥塞窗口（拥塞点cwnd）
+  - 怎么判断网络发生了拥塞
+- 滑动窗口（Sliding Windows）
+  - 描述RWND和CWND动态变化的机制
+
+### TCP.RWND
+
+示例
+     
+       sender初始cwnd为2MSS
+       每次RTT后更新cwnd
+       所以每次收到ack后更新RTT
+       和cwnd，cwnd= cwnd*2
+       swnd=min(cwnd,rwnd)
+
+       注意：sender不是等待收到ACK
+       后才更新cwnd，而是RTT时间后
+       更新cwnd,更新后就可以进行
+       下一轮的发送
+
+                        Sender                                Receiver
+                           │           3way handshake            │
+       - - - -  获得iRTT   │ ◄─────────────────────────────────► │ 初始rwnd
+          ▲  baseRTT=iRTT  │                                     │
+          │                │seg1 - seg2                          │
+          │RTT1            ├───────────────────────────────────► │
+          │    cwnd=2MSS   ├───────────────────────────────────► │ 每接受两个seg响应一个ack
+          ▼                │                                     │
+        - - - - - - - - - -│                                     │
+          ▲                ├─seg3──────────────────────────────► │
+          │                │◄──────────────────────────────ack3─ │ ack更新rwnd
+          │    cwnd=4MSS   ├─seg4 .. seg6 ─────────────────────► │
+                           │                                     │
+        - - - - - - - - - -│                                     │
+          ▲    cwnd=8MSS   ├─seg7──────────────────────────────► │
+          │                │ ◄─────────────────────────────ack7──┤
+          │                ├─seg8 .. seg13─────────────────────► │
+          │RTT3            │ ◄─────────────────────────────ack9──┤
+                             ◄─────────────────────────────ack11─│
+       - - - - - - - - - - │ ◄─────────────────────────────ack13─┤
+                           │                                     │
+                           ▼                                     ▼
+
+TCP接受窗口限制和扩展
+由于TCP报文头中window字段只有16bit，能表示最大值为64KB，
+举例：对于10Gbps，50ms的网络，其BDP = 10,000,000,000 × 0.05 = 500,000,000 bits ≈ 62.5 MB。
+所以原有的windows字段设置的rwnd无法让sender跑满带宽，
+为了扩展rwnd，tcp增加了 Window scaling option ，
+
+接收窗口的限制和扩展：
+扩展：窗口缩放选项（Window Scaling Option）
+实际接收窗口
+- 原始窗口值 × Window Scaling Factor = 原始窗口值 × 2的S次方
+其中：S为shift count，取值范围为0-14。最大接收窗口可以从64KB 提升到大约1GB。
+比如，如果shift count=7，则实际rwnd=Window Size x 128
+
+window Scaling option是在3 way handshake完成协商
+
+### CWND
+
+定义
+- 拥塞窗口（cwnd）：拥塞窗口表示发送方在未收到确认之前可以发送的数据量。
+  - 意义为：sender 认为即使 receiver允许我多发，但实际发送速率需要根据我自己的拥塞算法确定。
+- CWND不是TCP报文中存在的，是sender的协议栈自己维护的。
+
+影响
+- 更新频率：cwnd 的变化通常以 RTT 为周期。
+- 如果rtt增大，cwnd的更新时间就会增加。RTT减小，cwnd 更新时间减小 
+  - 所以cwnd的增减并不一定意味着发送速率的增减。
+  - 例如：8*MSS/50ms=16*MSS/100ms
+    - 每50ms发8MSS = 每100ms发16MSS
+    - 重点：拥塞窗口增大 ≠ 发送速率提升
+
+wireshark中无法观察CWND，但可以通过 BytesInFlight 间接观察 cwnd的变化
+
+### SWND
+Actual send Window Size：有的文档中也写作 swnd，或 Effective Window，就是 Sender 实际上能发送的数据窗口。
+
+影响 swnd 大小的因素众多，其中包括：
+- Actual send window ≤ minimum (rwnd, cwnd)
+- “The minimum of cwnd and rwnd governs data transmission.” –RFC5681
+- 应用层生成数据的速度
+- 发送缓冲区的大小（send buffer size）
+- 接收缓冲区的大小（receive buffer size）
+- BDP & network buffer size
+
+Note：只有当没有其他因素影响时，swnd= minimum (rwnd, cwnd)
+
+### BIF
+Bytes in Flight: (也叫 Inflight、Unacked Bytes、BIF、Bytes out 或 Outstanding Bytes) 指的是在某个时间点，已经发送但还没有被 ACK 确认的数据量。常作用CWND的近似值
+
+Bytes in Flight = LastByteSent - LastByteAcked
+
+
+BIF大小受什么限制？
+- 它的上限其实就是实际发送窗口，也就是swnd。
+- swnd ≤ min(cwnd, rwnd)
+
+Bytes in Flight ≤ min(cwnd, rwnd)
+比如：T7, BIF=4*MSS=cwnd
+
+当接收窗口构成限制，当Bytes in Flight达到接收窗口的时候，就进入了一个我们叫做“TCP Window Full”的状态。
+
+| TCP 事件     | Bytes in Flight 的变化说明       |
+| ------------ | -------------------------------- |
+| 发送新数据包 | BIF 增加                         |
+| 收到 ACK     | BIF 减少被确认的数据             |
+| 收到 SACK    | 不一定影响 BIF（详见下节）|
+| 发生重传     | BIF 增加（再次计入）|
+
+
+Bytes in Flight的更新时机
+
+系统追踪Bytes in Flight的变化，控制发送速度，确保不会超过cwnd和rwnd的较小值。
+
+BIF和SACK
+只有ACK(累计确认)才减少BIF
+SACK(选择确认)不影响BIF，因为数据不完整，应用层不会读取数据，导致数据仍在缓冲区中，如果以SACK导致BIF减少，会导致发送方发送多的数据而接受方缓冲区不够。
+
+wireshark中观察BIF
+- 当接收窗口构成限制时：Bytes in Flight 的最大值 = swnd=rwnd
+- 当 rwnd 足够大(cwnd构成限制)：Bytes in Flight 的最大值 ≈ swnd ≈ cwnd
+- 以特定 RTT 内为观测周期
+
+
+#### Sliding Window 滑动窗口
+滑动窗口
+  - 描述RWND和CWND动态变化的机制
+
+
+           sender                                       receiver
+         ────┬─────                                   ────┬──────
+             │                                            │
+             │                                            │
+             │                                            ▼
+             │
+          ───┴───────────────────────────────────────────────────►
+
+
+         ──────────────────────────────────────────────────────►
+
+CWND和RWND都有滑动机制，两端滑动窗口独立控制。
+两个窗口中较小的那个决定流速大小: swnd <= min(cwnd, rwnd)
+
+
+
+
+
+
+
+
+
 
 
