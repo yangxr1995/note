@@ -2501,3 +2501,14 @@ return {
         end
     }
 ```
+
+### wsl ubuntu24 支持音频
+```bash
+sudo apt update
+sudo apt install -y pulseaudio alsa-utils mpg321
+
+mkdir -p ~/.config/pulse
+echo "default-server = unix:/mnt/wslg/PulseServer" > ~/.config/pulse/client.conf
+
+mpg321 /path/to/your/song.mp3
+```
