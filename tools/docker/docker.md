@@ -1,7 +1,8 @@
 
-# 拉取image
-## 设置加速
-### registry-mirrors
+# image
+## 拉取image
+### 设置加速
+#### registry-mirrors
 ```bash
 sudo vim /etc/docker/daemon.json <<EOF
 {
@@ -15,13 +16,13 @@ systemctl daemon-reload
 systemctl restart docker
 ```
 
-### DockerHub
+#### DockerHub
 ```bash
 # 无需修改配置，拉取时通过命令行指定 DockerHub
 docker pull docker.io/library/mysql:5.7
 ```
 
-### registry-mirrors 和 DockerHub 的差别
+#### registry-mirrors 和 DockerHub 的差别
 - DockerHub：
   - Docker 官方的公共镜像仓库（https://hub.docker.com），存储了大量官方和社区开发的镜像（如 nginx、mysql 等），是 Docker 镜像的主要源头。
   - 镜像的「存储源」，所有官方和社区镜像的原始版本都托管在这里。
@@ -44,6 +45,39 @@ docker pull mysql:5.7  # 等价于 docker pull docker.io/library/mysql:5.7
 }
 ```
 配置后，执行 `docker pull mysql:5.7` 会自动通过 `https://docker.xuanyuan.me` 代理拉取，无需手动修改镜像地址。
+
+
+## 更新image
+使用 docker commit 命令。
+这相当于将容器当前的状态（包括所有修改）保存为一个新的镜像。
+步骤如下：
+查看当前运行的容器先获取要基于的容器 ID 或名称：
+```bash
+docker ps
+输出示例：
+plaintext
+CONTAINER ID   IMAGE          COMMAND       CREATED       STATUS       PORTS     NAMES
+a46312d5d066   original-image "/bin/bash"   2 hours ago   Up 2 hours             my-container
+```
+基于容器创建新镜像使用 docker commit 命令，格式：
+```bash
+docker commit [容器ID或名称] [新镜像名称]:[标签]
+```
+示例：
+```bash
+docker commit a46312d5d066 my-new-image:v1.0
+```
+验证新镜像查看本地镜像列表，确认新镜像已创建：
+```bash
+docker images | grep my-new-image
+```
+注意事项：
+docker commit 会将容器的所有文件系统变更打包为新镜像，包括临时文件等，可能导致镜像体积过大。
+推荐的最佳实践是使用 Dockerfile 构建镜像（可重复性更强），docker commit 仅适合临时测试场景。
+如果需要添加元数据（如作者、说明），可以使用 -m 和 -a 参数：
+```bash
+docker commit -m "添加了自定义配置" -a "作者名称" a46312d5d066 my-new-image:v1.0
+```
 
 # container
 ## 管理容器
@@ -87,11 +121,11 @@ docker rm $(docker ps -aq)
 docker rm -f $(docker ps -aq)
 ```
 
-# 运行 container
-## 前后台运行
-### 前台运行
+## 运行 container
+### 前后台运行
+#### 前台运行
 ```bash
-docker run -it：
+docker run  -it [--name <容器名>] <镜像名>
 ```
 - 参数:
   - -i（interactive）：保持标准输入（STDIN）打开，即使没有附加到容器
@@ -106,7 +140,7 @@ docker run -it：
 # 会启动 Ubuntu 容器并直接进入 bash 终端
 docker run -it ubuntu bash 
 ```
-### 后台运行
+#### 后台运行
 ```bash
 docker run -d：
 ```
@@ -129,7 +163,7 @@ docker run -d nginx
 docker exec -it mycontainer bash。
 ```
 
-## 文件挂载
+### 文件挂载
 要在 Docker 中运行镜像并挂载文件（或目录），可以使用 docker run 命令的 -v（或 --volume）参数实现。挂载可以让容器内访问主机的文件，或在容器停止后保留数据。
 基本语法
 ```bash
@@ -191,34 +225,3 @@ Windows 使用 /c/Users/user/data 或 C:\Users\user\data（需根据 Docker 版�
 通过挂载功能，可以实现容器与主机的数据共享，
 或为容器提供持久化存储，是 Docker 常用的重要功能。
 
-# 更新image
-使用 docker commit 命令。
-这相当于将容器当前的状态（包括所有修改）保存为一个新的镜像。
-步骤如下：
-查看当前运行的容器先获取要基于的容器 ID 或名称：
-```bash
-docker ps
-输出示例：
-plaintext
-CONTAINER ID   IMAGE          COMMAND       CREATED       STATUS       PORTS     NAMES
-a46312d5d066   original-image "/bin/bash"   2 hours ago   Up 2 hours             my-container
-```
-基于容器创建新镜像使用 docker commit 命令，格式：
-```bash
-docker commit [容器ID或名称] [新镜像名称]:[标签]
-```
-示例：
-```bash
-docker commit a46312d5d066 my-new-image:v1.0
-```
-验证新镜像查看本地镜像列表，确认新镜像已创建：
-```bash
-docker images | grep my-new-image
-```
-注意事项：
-docker commit 会将容器的所有文件系统变更打包为新镜像，包括临时文件等，可能导致镜像体积过大。
-推荐的最佳实践是使用 Dockerfile 构建镜像（可重复性更强），docker commit 仅适合临时测试场景。
-如果需要添加元数据（如作者、说明），可以使用 -m 和 -a 参数：
-```bash
-docker commit -m "添加了自定义配置" -a "作者名称" a46312d5d066 my-new-image:v1.0
-```
